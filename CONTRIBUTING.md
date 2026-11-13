@@ -9,10 +9,14 @@ Before proposing a change:
 
 ```sh
 cp examples/secrets.yaml.example secrets.yaml
+openssl rand -base64 32
 make test
 make compile-example
 python -m py_compile tools/*.py
 ```
+
+Paste the generated key into the `api_key` entry in `secrets.yaml` before
+compiling. Keep that file local; never commit or share the generated key.
 
 Changes to connection scheduling, retries, writes, Stop, or bulk behavior need a
 host-side regression test. Hardware validation should begin with one blind and
