@@ -24,7 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INVENTORY = os.environ.get("GRABER_INVENTORY")
 DEFAULT_CONTROLLER_ROOT = os.environ.get("GRABER_CONTROLLER_ROOT")
 DEFAULT_ESPHOME_ROOT = os.environ.get("GRABER_ESPHOME_ROOT")
-DEFAULT_BACKUP_ROOT = Path(os.environ.get("GRABER_BACKUP_ROOT", "deploy-backups"))
+DEFAULT_BACKUP_ROOT = os.environ.get("GRABER_BACKUP_ROOT")
+DEFAULT_DEPLOY_CONFIG = os.environ.get("GRABER_DEPLOY_CONFIG")
 
 
 def die(message: str) -> "NoReturn":
@@ -48,15 +49,24 @@ def load_inventory(path: Path) -> list[dict]:
     return controllers
 
 
-def choose(controllers: list[dict], target: str) -> list[dict]:
-    aliases = {
-        "living": "graber-blinds-controller",
-        "main": "graber-west-controller",
-        "west": "graber-west-controller",
-        "upper": "graber-east-controller",
-        "east": "graber-east-controller",
-        "basement": "graber-basement-controller",
-    }
+def load_deploy_config(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    if not path.exists():
+        die(f"private deploy config not found: {path}")
+    try:
+        config = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        die(f"cannot read deploy config {path}: {exc}")
+    if not isinstance(config, dict):
+        die("deploy config must be a JSON object")
+    for key in ("aliases", "devices"):
+        if key in config and not isinstance(config[key], dict):
+            die(f"deploy config {key!r} must be an object")
+    return config
+
+
+def choose(controllers: list[dict], target: str, aliases: dict[str, str]) -> list[dict]:
     if target == "all":
         return controllers
     wanted = aliases.get(target, target)
@@ -145,9 +155,11 @@ def make_build_workspace(
     return workspace
 
 
-def parse_devices(values: list[str], selected: list[dict]) -> dict[str, str]:
+def parse_devices(values: list[str], selected: list[dict], configured: dict[str, str]) -> dict[str, str]:
     if not values:
-        return {c["name"]: f"{c['name']}.local" for c in selected}
+        result = {c["name"]: configured[c["name"]] for c in selected if c["name"] in configured}
+        result.update({c["name"]: f"{c['name']}.local" for c in selected if c["name"] not in result})
+        return result
     result: dict[str, str] = {}
     for value in values:
         if "=" in value:
@@ -166,11 +178,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Deploy reviewed Graber controller sources (dry-run by default)."
     )
-    parser.add_argument(
-        "target",
-        choices=("living", "main", "upper", "basement", "all"),
-        help="controller group to deploy; all is still compiled one controller at a time",
-    )
+    parser.add_argument("target", help="inventory target name, alias, or all")
+    parser.add_argument("--deploy-config", type=Path, default=DEFAULT_DEPLOY_CONFIG,
+                        help="ignored private JSON file with paths, aliases, and devices")
     parser.add_argument("--inventory", type=Path, default=DEFAULT_INVENTORY)
     parser.add_argument("--controller-root", type=Path, default=DEFAULT_CONTROLLER_ROOT)
     parser.add_argument("--esphome-root", type=Path, default=DEFAULT_ESPHOME_ROOT)
@@ -183,6 +193,16 @@ def main() -> int:
     parser.add_argument("--flash", action="store_true", help="OTA-upload after compiling")
     parser.add_argument("--skip-backup", action="store_true", help="not recommended")
     args = parser.parse_args()
+
+    config = load_deploy_config(args.deploy_config)
+    args.inventory = args.inventory or config.get("inventory")
+    args.controller_root = args.controller_root or config.get("controller_root")
+    args.esphome_root = args.esphome_root or config.get("esphome_root")
+    args.backup_root = args.backup_root or config.get("backup_root")
+    for name in ("inventory", "controller_root", "esphome_root", "backup_root"):
+        value = getattr(args, name)
+        if value is not None:
+            setattr(args, name, Path(value))
 
     if args.inventory is None:
         die("--inventory is required (or set GRABER_INVENTORY in a private environment)")
@@ -199,10 +219,12 @@ def main() -> int:
         die("--config requires --apply")
     if args.skip_backup and not args.apply:
         die("--skip-backup only applies with --apply")
+    if args.apply and not args.skip_backup and args.backup_root is None:
+        die("--backup-root is required for --apply (or set it in the private deploy config)")
 
     controllers = load_inventory(args.inventory)
-    selected = choose(controllers, args.target)
-    devices = parse_devices(args.device, selected)
+    selected = choose(controllers, args.target, config.get("aliases", {}))
+    devices = parse_devices(args.device, selected, config.get("devices", {}))
     print(f"repository: {REPO_ROOT}")
     print(f"target: {', '.join(c['name'] for c in selected)}")
     print(f"mode: {'APPLY' if args.apply else 'DRY RUN'}")

@@ -4,6 +4,8 @@ __pycache__/
 *.py[cod]
 secrets.yaml
 private/
+/deploy-config.json
+/deploy-config.*.json
 generated/
 *.generated.yaml
 *.refactored.yaml

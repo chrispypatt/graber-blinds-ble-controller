@@ -20,46 +20,41 @@ cache and generated build files do not depend on the live Home Assistant mount.
 The temporary tree is removed when the command exits; secrets are never staged
 in the repository or retained by this tool.
 
-Set private deployment paths in your shell (or pass the corresponding flags):
+Create an ignored private JSON file from `examples/deploy-config.example.json`.
+It may contain deployment paths, target aliases, and upload addresses; none of
+those belong in this repository. Pass it with `--deploy-config` or set
+`GRABER_DEPLOY_CONFIG`.
 
 ```sh
-export GRABER_INVENTORY=/path/to/private/controllers.json
-export GRABER_CONTROLLER_ROOT=/path/to/ha/graber-controller
-export GRABER_ESPHOME_ROOT=/path/to/ha/esphome
-export GRABER_BACKUP_ROOT=/path/to/private/deploy-backups
+export GRABER_DEPLOY_CONFIG=/path/to/private/deploy-config.json
 ```
 
 From the repository checkout:
 
 ```sh
-# Inspect the plan; changes nothing.
-python3 tools/deploy_controllers.py living
+# Inspect the plan for an alias or inventory controller name; changes nothing.
+python3 tools/deploy_controllers.py <target> --deploy-config "$GRABER_DEPLOY_CONFIG"
 
 # Sync and regenerate Living, but do not build or flash.
-python3 tools/deploy_controllers.py living --apply
+python3 tools/deploy_controllers.py <target> --deploy-config "$GRABER_DEPLOY_CONFIG" --apply
 
 # Sync, validate, and compile Living.
-python3 tools/deploy_controllers.py living --apply --config --compile
+python3 tools/deploy_controllers.py <target> --deploy-config "$GRABER_DEPLOY_CONFIG" --apply --config --compile
 
 # Compile and OTA-upload one controller. Use its current IP or mDNS name.
-python3 tools/deploy_controllers.py living --apply --config --flash \
-  --device living=<controller-address-or-hostname>
+python3 tools/deploy_controllers.py <target> --deploy-config "$GRABER_DEPLOY_CONFIG" --apply --config --flash
 
 # Build all four controllers without uploading.
-python3 tools/deploy_controllers.py all --apply --config --compile
+python3 tools/deploy_controllers.py all --deploy-config "$GRABER_DEPLOY_CONFIG" --apply --config --compile
 
 # Upload multiple controllers with explicit addresses.
-python3 tools/deploy_controllers.py all --apply --config --flash \
-  --device living=<living-address-or-hostname> \
-  --device main=<main-address-or-hostname> \
-  --device upper=<upper-address-or-hostname> \
-  --device basement=<basement-address-or-hostname>
+python3 tools/deploy_controllers.py all --deploy-config "$GRABER_DEPLOY_CONFIG" --apply --config --flash
 ```
 
-Target aliases are `living`, `main`, `upper`, `basement`, and `all`. With no
-`--device`, the upload target defaults to `<controller-name>.local`; pass an
-explicit address when mDNS is unreliable. `--skip-backup` exists for recovery
-workflows only and is intentionally not recommended.
+Target aliases are defined by the private config; `all` is always available.
+With no configured device address, upload defaults to `<controller-name>.local`.
+`--device NAME=ADDRESS` can override a configured address. `--skip-backup`
+exists for recovery workflows only and is intentionally not recommended.
 
 Recommended rollout is one controller at a time: apply/config/compile Living,
 flash Living, verify its Home Assistant entities and movement, then proceed to
