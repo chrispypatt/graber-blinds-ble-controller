@@ -1,0 +1,33 @@
+{
+  "controllers": [
+    {
+      "file": "graber-example-controller.generated.yaml",
+      "name": "graber-example-controller",
+      "friendly_name": "Graber Example Controller",
+      "blinds": [
+        {
+          "id": "living_left",
+          "name": "Living Left",
+          "mac_secret": "graber_living_left_mac",
+          "token_secret": "graber_living_left_token",
+          "dual_rail": true
+        },
+        {
+          "id": "living_right",
+          "name": "Living Right",
+          "mac_secret": "graber_living_right_mac",
+          "token_secret": "graber_living_right_token",
+          "dual_rail": false
+        }
+      ],
+      "groups": [
+        {
+          "id": "living",
+          "name": "Living",
+          "blinds": ["living_left", "living_right"],
+          "tdbu_blinds": ["living_left"]
+        }
+      ]
+    }
+  ]
+}

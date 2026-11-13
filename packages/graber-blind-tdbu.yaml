@@ -1,0 +1,40 @@
+cover:
+  - platform: template
+    name: ${blind_name} Top
+    id: ${blind_id}_top_cover
+    device_class: shade
+    has_position: true
+    optimistic: false
+    lambda: |-
+      if (!id(${blind_id}_top).has_state() || !std::isfinite(id(${blind_id}_top).state)) return {};
+      return 1.0f - (id(${blind_id}_top).state / 100.0f);
+    position_action:
+      - lambda: id(${blind_id}_dispatcher).enqueue(0, 1, int(lroundf((1.0f - pos) * 100.0f)));
+    open_action:
+      - lambda: id(${blind_id}_dispatcher).enqueue(0, 1, 0);
+    close_action:
+      - lambda: id(${blind_id}_dispatcher).enqueue(0, 1, 100);
+    stop_action:
+      - lambda: id(${blind_id}_dispatcher).enqueue(1);
+
+button:
+  - platform: template
+    name: ${blind_name} Stack Up
+    id: ${blind_id}_stack_up
+    on_press:
+      - lambda: id(${blind_id}_dispatcher).enqueue(9);
+  - platform: template
+    name: ${blind_name} Stack Down
+    id: ${blind_id}_stack_down
+    on_press:
+      - lambda: id(${blind_id}_dispatcher).enqueue(10);
+  - platform: template
+    name: ${blind_name} Preset 4
+    id: ${blind_id}_preset_4
+    on_press:
+      - lambda: id(${blind_id}_dispatcher).enqueue(6);
+  - platform: template
+    name: ${blind_name} Preset 5
+    id: ${blind_id}_preset_5
+    on_press:
+      - lambda: id(${blind_id}_dispatcher).enqueue(7);

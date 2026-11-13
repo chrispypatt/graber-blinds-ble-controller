@@ -1,0 +1,139 @@
+defaults:
+  blind_dual_rail: "false"
+  blind_dual_rail_cpp: "0"
+  blind_top_internal: "true"
+  blind_bottom_cover_name: "${blind_name} Bottom"
+  blind_bottom_reported_name: "${blind_name} Bottom Reported"
+
+esp32_ble_tracker:
+  on_ble_advertise:
+    - mac_address: ${blind_mac}
+      then:
+        - lambda: |-
+            for (const auto &manufacturer : x.get_manufacturer_datas()) {
+              if (manufacturer.data.size() < 4 || manufacturer.data[2] > 100) continue;
+              id(${blind_id}_bottom).publish_state(manufacturer.data[2]);
+              id(${blind_id}_rssi).publish_state(x.get_rssi());
+              if (${blind_dual_rail_cpp} && manufacturer.data[3] <= 100) {
+                id(${blind_id}_top).publish_state(manufacturer.data[3]);
+              }
+            }
+
+ble_client:
+  - mac_address: ${blind_mac}
+    id: ${blind_id}_client
+    auto_connect: false
+
+graber_dispatcher:
+  - id: ${blind_id}_dispatcher
+    label: ${blind_name}
+    dual_rail: ${blind_dual_rail}
+    ble_client_id: ${blind_id}_client
+    token: ${blind_token}
+    bottom_sensor: ${blind_id}_bottom
+    top_sensor: ${blind_id}_top
+    bottom_notify_sensor: ${blind_id}_gatt_0021
+    top_notify_sensor: ${blind_id}_gatt_0089
+    battery_sensor: ${blind_id}_battery
+    status_sensor: ${blind_id}_command_status
+
+sensor:
+  - platform: template
+    name: ${blind_name} RSSI
+    id: ${blind_id}_rssi
+    accuracy_decimals: 0
+    update_interval: never
+    unit_of_measurement: dBm
+    device_class: signal_strength
+    state_class: measurement
+    entity_category: diagnostic
+  - platform: template
+    name: ${blind_name} Battery
+    id: ${blind_id}_battery
+    accuracy_decimals: 0
+    update_interval: never
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    entity_category: diagnostic
+  - platform: template
+    name: ${blind_bottom_reported_name}
+    id: ${blind_id}_bottom
+    accuracy_decimals: 0
+    update_interval: never
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+  - platform: template
+    name: ${blind_name} Top Reported
+    id: ${blind_id}_top
+    accuracy_decimals: 0
+    update_interval: never
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    internal: ${blind_top_internal}
+  - platform: template
+    name: ${blind_name} GATT 0021
+    id: ${blind_id}_gatt_0021
+    accuracy_decimals: 0
+    update_interval: never
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+  - platform: template
+    name: ${blind_name} GATT 0089
+    id: ${blind_id}_gatt_0089
+    accuracy_decimals: 0
+    update_interval: never
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    internal: ${blind_top_internal}
+
+text_sensor:
+  - platform: template
+    name: ${blind_name} Command Status
+    id: ${blind_id}_command_status
+    entity_category: diagnostic
+    update_interval: never
+
+cover:
+  - platform: template
+    name: ${blind_bottom_cover_name}
+    id: ${blind_id}_bottom_cover
+    device_class: shade
+    has_position: true
+    optimistic: false
+    lambda: |-
+      if (!id(${blind_id}_bottom).has_state() || !std::isfinite(id(${blind_id}_bottom).state)) return {};
+      return id(${blind_id}_bottom).state / 100.0f;
+    position_action:
+      - lambda: id(${blind_id}_dispatcher).enqueue(0, 0, int(lroundf(pos * 100.0f)));
+    open_action:
+      - lambda: id(${blind_id}_dispatcher).enqueue(0, 0, 100);
+    close_action:
+      - lambda: id(${blind_id}_dispatcher).enqueue(0, 0, 0);
+    stop_action:
+      - lambda: id(${blind_id}_dispatcher).enqueue(1);
+
+button:
+  - platform: template
+    name: ${blind_name} Favorite
+    id: ${blind_id}_favorite
+    on_press:
+      - lambda: id(${blind_id}_dispatcher).enqueue(3);
+  - platform: template
+    name: ${blind_name} Fully Open
+    id: ${blind_id}_fully_open
+    on_press:
+      - lambda: id(${blind_id}_dispatcher).enqueue(4);
+  - platform: template
+    name: ${blind_name} Fully Closed
+    id: ${blind_id}_fully_closed
+    on_press:
+      - lambda: id(${blind_id}_dispatcher).enqueue(5);
+
+packages:
+  - !include
+      file: graber-blind-tdbu.yaml
+      vars:
+        blind_id: ${blind_id}
+        blind_name: ${blind_name}
+      condition: ${blind_dual_rail}
