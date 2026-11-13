@@ -53,8 +53,8 @@ separation. This is distinct from setting two independent absolute positions:
   travel can continue while its partner stays at the limit.
 - `0x05` is the only confirmed shared-step size. Other target values are not
   exposed as adjustable step sizes.
-- An earlier Android HCI capture in the private `graber-actions-1` bundle also
-  contains paired target writes `0x37` before Execute `0x18` and `0x0f` before
+- An earlier private Android HCI capture also contains paired target writes
+  `0x37` before Execute `0x18` and `0x0f` before
   Execute `0x19`, followed by rail movement. The action labels and exact intent
   are not sufficiently correlated in that older capture to treat these as
   validated variable step sizes. They remain a lead for future capture work.
