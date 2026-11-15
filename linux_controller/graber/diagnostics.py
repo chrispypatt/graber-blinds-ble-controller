@@ -140,6 +140,33 @@ def _powered_by_address(runner: CommandRunner) -> dict[str, bool]:
     return states
 
 
+def _bluez_property(runner: CommandRunner, hci_name: str, property_name: str) -> str | None:
+    """Read an Adapter1 property using the stable BlueZ object path.
+
+    Some kernels do not publish ``address`` in the Bluetooth class sysfs
+    directory.  BlueZ still exposes the controller address and power state on
+    ``/org/bluez/hciN``.  This read-only fallback also preserves the mapping
+    between a transient HCI name and its USB parent.
+    """
+
+    try:
+        result = runner((
+            "busctl", "--system", "get-property", "org.bluez",
+            f"/org/bluez/{hci_name}", "org.bluez.Adapter1", property_name,
+        ))
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    string_value = re.fullmatch(r'\s*s\s+"([^"]+)"\s*', result.stdout)
+    if string_value:
+        return string_value.group(1)
+    boolean_value = re.fullmatch(r"\s*b\s+(true|false)\s*", result.stdout)
+    if boolean_value:
+        return boolean_value.group(1)
+    return None
+
+
 def discover_adapters(
     sysfs_root: str | Path = "/sys/class/bluetooth",
     *,
@@ -161,6 +188,8 @@ def discover_adapters(
         hci_entries = []
     for entry in hci_entries:
         address = _read_text(entry / "address")
+        if not address:
+            address = _bluez_property(runner, entry.name, "Address")
         address = address.upper() if address else None
         device_link = entry / "device"
         try:
@@ -172,7 +201,13 @@ def discover_adapters(
             AdapterIdentity(
                 hci_name=entry.name,
                 address=address,
-                powered=powered.get(address) if address else None,
+                powered=(
+                    powered.get(address)
+                    if address in powered
+                    else {"true": True, "false": False}.get(
+                        _bluez_property(runner, entry.name, "Powered") or ""
+                    )
+                ),
                 usb_vendor_id=_read_text(usb / "idVendor") if usb else None,
                 usb_product_id=_read_text(usb / "idProduct") if usb else None,
                 usb_manufacturer=_read_text(usb / "manufacturer") if usb else None,

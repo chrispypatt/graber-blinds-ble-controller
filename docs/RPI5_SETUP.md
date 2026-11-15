@@ -46,6 +46,12 @@ unprivileged `graber` account, installs source under `/opt/graber-controller`,
 creates its virtual environment from the pinned requirements, and installs the
 systemd unit. It deliberately leaves the service stopped and disabled.
 
+Those are generic defaults, not assumptions about a particular host. Override
+them when needed by setting `GRABER_INSTALL_DIR`, `GRABER_CONFIG_DIR`,
+`GRABER_STATE_DIR`, and/or `GRABER_SERVICE_NAME` consistently for both the dry
+run and apply commands. The installer renders those values into the local unit;
+no host-specific path or identity is committed to the repository.
+
 The service uses BlueZ over system D-Bus and does not run as root. Verify the
 installed user can inspect BlueZ before proceeding:
 
@@ -105,18 +111,17 @@ private capture path. A readable seven-digit value remains a candidate until a
 later supervised movement proves it. The capture is mode `0600` and must not be
 shared or committed.
 
-For a browser workflow, set a temporary private token and start the setup wizard
-with both external adapters selected. Scanning, naming, type confirmation,
-adapter assignment, and export do not move a blind:
+For a browser workflow, copy `deploy/setup-wizard.example.env` to a private
+host-only file, replace every example with the local paths, network, and two
+external controller addresses, and generate a separate token file. Neither
+private file belongs in Git. Scanning, naming, type confirmation, adapter
+assignment, and export do not move a blind:
 
 ```sh
-export GRABER_SETUP_TOKEN="$(openssl rand -hex 24)"
-sudo -u graber env GRABER_SETUP_TOKEN="$GRABER_SETUP_TOKEN" \
-  /opt/graber-controller/.venv/bin/python -m graber.identify_web \
-  --host 0.0.0.0 --port 8090 --allowed-network 192.168.1.0/24 \
-  --controller-address ADAPTER_A_ADDRESS \
-  --controller-address ADAPTER_B_ADDRESS \
-  --export-dir /var/lib/graber-controller/setup
+sudo -u graber sh -c 'umask 077; openssl rand -hex 24 > /var/lib/graber-controller/setup-token'
+sudo chmod 0600 /var/lib/graber-controller/setup.env /var/lib/graber-controller/setup-token
+sudo -u graber /opt/graber-controller/bin/run-setup-wizard \
+  /var/lib/graber-controller/setup.env
 ```
 
 Open `http://PI_ADDRESS:8090`, enter the token, scan, inspect, name, and assign

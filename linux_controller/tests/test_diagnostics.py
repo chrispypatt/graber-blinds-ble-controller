@@ -54,6 +54,34 @@ def test_discovers_usb_identity_independently_of_hci_number(tmp_path: Path) -> N
     assert adapter.is_usb
 
 
+def test_discovers_address_from_bluez_when_sysfs_omits_it(tmp_path: Path) -> None:
+    usb = tmp_path / "devices" / "usb1" / "1-2"
+    hci_device = usb / "1-2:1.0" / "bluetooth" / "hci4"
+    hci_device.mkdir(parents=True)
+    (usb / "idVendor").write_text("0a12")
+    (usb / "idProduct").write_text("0001")
+    classes = tmp_path / "class" / "bluetooth"
+    classes.mkdir(parents=True)
+    entry = classes / "hci4"
+    entry.mkdir()
+    (entry / "device").symlink_to(hci_device)
+
+    def runner(command):
+        command = tuple(command)
+        if command == ("bluetoothctl", "list"):
+            return _completed("")
+        if command[-1] == "Address":
+            return _completed('s "AA:BB:CC:DD:EE:04"\n')
+        if command[-1] == "Powered":
+            return _completed("b true\n")
+        return _completed(returncode=1)
+
+    adapter = discover_adapters(classes, runner=runner)[0]
+    assert adapter.address == "AA:BB:CC:DD:EE:04"
+    assert adapter.powered is True
+    assert adapter.usb_path == "1-2"
+
+
 def test_select_adapter_requires_stable_selector_and_rejects_ambiguity() -> None:
     adapters = [
         AdapterIdentity("hci0", "AA:00:00:00:00:01", True, usb_serial="same", usb_path="1-1"),

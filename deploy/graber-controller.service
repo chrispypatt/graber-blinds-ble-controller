@@ -9,15 +9,14 @@ Type=simple
 User=graber
 Group=graber
 SupplementaryGroups=bluetooth
-WorkingDirectory=/opt/graber-controller
-Environment=PYTHONPATH=/opt/graber-controller
-EnvironmentFile=-/etc/graber-controller/environment
-ExecStart=/opt/graber-controller/.venv/bin/python -m graber.main --config /etc/graber-controller/config.toml --secrets /etc/graber-controller/secrets.toml
+WorkingDirectory=@INSTALL_DIR@
+Environment=PYTHONPATH=@INSTALL_DIR@
+EnvironmentFile=-@CONFIG_DIR@/environment
+ExecStart=@INSTALL_DIR@/.venv/bin/python -m graber.main --config @CONFIG_DIR@/config.toml --secrets @CONFIG_DIR@/secrets.toml
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=25s
 KillSignal=SIGINT
-StateDirectory=graber-controller
 UMask=0027
 
 # BlueZ is accessed over the system D-Bus; the service does not need root.
@@ -33,7 +32,7 @@ RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/var/lib/graber-controller
+ReadWritePaths=@STATE_DIR@
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
 LogRateLimitIntervalSec=30s
