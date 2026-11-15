@@ -40,6 +40,10 @@ export PYTHONPATH=${GRABER_SETUP_PYTHONPATH:-$GRABER_SETUP_SOURCE_DIR/linux_cont
 set -- "$python" -m graber.identify_web \
   --host "$host" --port "$port" --export-dir "$GRABER_SETUP_EXPORT_DIR"
 
+if [ -n "${GRABER_SETUP_KNOWN_SECRETS:-}" ]; then
+  set -- "$@" --known-secrets "$GRABER_SETUP_KNOWN_SECRETS"
+fi
+
 old_ifs=$IFS
 IFS=,
 for network in $GRABER_SETUP_ALLOWED_NETWORKS; do

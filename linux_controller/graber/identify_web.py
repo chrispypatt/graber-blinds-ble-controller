@@ -9,6 +9,8 @@ import json
 import os
 import re
 import secrets
+import stat
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -19,7 +21,7 @@ from .blind import BlindCommand, BlindController, Outcome
 from .config import AdapterConfig, BlindConfig, RetryConfig
 from .diagnostics import AdapterIdentity, discover_adapters
 from .identify_cli import MotorObservation, inspect_motor, scan
-from .protocol import CommandKind, Rail
+from .protocol import CommandKind, Rail, raw_to_ha_position
 
 
 def slug(value: str) -> str:
@@ -30,6 +32,52 @@ def slug(value: str) -> str:
 def opaque_id(address: str) -> str:
     import hashlib
     return hashlib.sha256(address.encode("utf-8")).hexdigest()[:12]
+
+
+def load_known_credentials(path: str | Path) -> dict[str, str]:
+    """Load address-to-code mappings without exposing them to browser state.
+
+    The accepted format is the controller's normal private secrets TOML. Blind
+    table names are informational; Bluetooth addresses are the match key.
+    """
+
+    source = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise ValueError("known-secrets path must be a readable regular file, not a symlink") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("known-secrets path must be a regular file")
+        if metadata.st_uid != os.geteuid():
+            raise ValueError("known-secrets file must be owned by the wizard user")
+        if stat.S_IMODE(metadata.st_mode) & 0o177:
+            raise ValueError("known-secrets file must have mode 0600 or stricter")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            raw = tomllib.load(stream)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    blinds = raw.get("blinds", {})
+    if not isinstance(blinds, dict):
+        raise ValueError("known-secrets file requires a [blinds] table")
+    credentials: dict[str, str] = {}
+    for blind_id, item in blinds.items():
+        if not isinstance(item, dict):
+            raise ValueError(f"known secret for {blind_id} must be a table")
+        address = str(item.get("address", "")).upper()
+        code = str(item.get("access_code", ""))
+        if not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", address):
+            raise ValueError(f"known secret for {blind_id} has an invalid Bluetooth address")
+        if re.fullmatch(r"[0-9]{7}", code) is None:
+            raise ValueError(f"known secret for {blind_id} has an invalid access code")
+        if address in credentials:
+            raise ValueError("known-secrets file contains a duplicate Bluetooth address")
+        credentials[address] = code
+    return credentials
 
 
 @dataclass
@@ -44,6 +92,14 @@ class DeviceSetup:
     access_code: str | None = field(default=None, repr=False)
 
     def browser_dict(self, allow_code_read: bool) -> dict[str, Any]:
+        bottom_position = (
+            raw_to_ha_position(Rail.BOTTOM, self.observation.bottom_raw)
+            if self.observation.bottom_raw is not None else None
+        )
+        top_position = (
+            raw_to_ha_position(Rail.TOP, self.observation.top_raw)
+            if self.dual_rail and self.observation.top_raw is not None else None
+        )
         return {
             "key": opaque_id(self.observation.address),
             "advertised_name": self.observation.name,
@@ -56,6 +112,8 @@ class DeviceSetup:
             "enabled": self.enabled,
             "bottom_raw": self.observation.bottom_raw,
             "top_raw": self.observation.top_raw,
+            "bottom_position": bottom_position,
+            "top_position": top_position,
             "rssi_median": self.observation.rssi_median,
             "firmware": self.observation.firmware,
             "battery": self.observation.battery,
@@ -67,10 +125,12 @@ class DeviceSetup:
 
 class SetupSession:
     def __init__(self, adapters: list[AdapterIdentity], *, allow_code_read: bool = False,
-                 export_dir: str | Path | None = None):
+                 export_dir: str | Path | None = None,
+                 known_credentials: dict[str, str] | None = None):
         self.adapters = {item.address or item.hci_name: item for item in adapters}
         self.allow_code_read = allow_code_read
         self.export_dir = Path(export_dir).resolve() if export_dir else None
+        self.known_credentials = dict(known_credentials or {})
         self.devices: dict[str, DeviceSetup] = {}
         self.ble_lock = asyncio.Lock()
 
@@ -84,10 +144,13 @@ class SetupSession:
                     if key in self.devices:
                         existing = self.devices[key]
                         existing.observation = motor
+                        if existing.access_code is None:
+                            existing.access_code = self.known_credentials.get(motor.address.upper())
                         continue
                     default_id = slug(motor.name)
                     self.devices[key] = DeviceSetup(
-                        motor, default_id, motor.name, motor.top_raw is not None, adapter_id
+                        motor, default_id, motor.name, False, adapter_id,
+                        access_code=self.known_credentials.get(motor.address.upper()),
                     )
 
     def state(self, *, allow_jog: bool) -> dict[str, Any]:
@@ -338,6 +401,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--allow-code-read", action="store_true")
     parser.add_argument("--allow-jog", action="store_true")
     parser.add_argument("--export-dir")
+    parser.add_argument("--known-secrets",
+                        help="mode-0600 controller secrets TOML used to prefill codes by address")
     args = parser.parse_args(argv)
     token = os.environ.get("GRABER_SETUP_TOKEN")
     if not token or len(token) < 16:
@@ -354,8 +419,10 @@ def main(argv: list[str] | None = None) -> None:
     if not networks:
         raise SystemExit("at least one --allowed-network is required for a non-loopback bind")
     settings = SetupWebSettings(args.host, args.port, networks, args.allow_jog, token)
+    known_credentials = load_known_credentials(args.known_secrets) if args.known_secrets else {}
     web.run_app(create_app(SetupSession(adapters, allow_code_read=args.allow_code_read,
-                                        export_dir=args.export_dir), settings),
+                                        export_dir=args.export_dir,
+                                        known_credentials=known_credentials), settings),
                 host=args.host, port=args.port, access_log=None)
 
 

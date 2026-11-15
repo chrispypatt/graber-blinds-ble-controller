@@ -124,6 +124,15 @@ sudo -u graber /opt/graber-controller/bin/run-setup-wizard \
   /var/lib/graber-controller/setup.env
 ```
 
+`GRABER_SETUP_KNOWN_SECRETS` may point to an existing mode-`0600` controller
+secrets TOML owned by the wizard user. The wizard matches credentials by
+normalized Bluetooth address, retains them only on the server, and tells the
+browser only whether a credential is loaded. It never returns the code in page
+state or logs. Import the deployed HA inventory once into this local file; the
+wizard must not SSH to Home Assistant or depend on HA being available at run
+time. Unknown devices remain credential-missing and cannot be exported until a
+verified code is supplied.
+
 Open `http://PI_ADDRESS:8090`, enter the token, scan, inspect, name, and assign
 devices. The exported `config.toml` and mode-`0600` `secrets.toml` are a draft:
 review them before installing under `/etc/graber-controller`.
