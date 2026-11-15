@@ -1,0 +1,77 @@
+# Public topology only. Copy to /etc/graber-controller/config.toml.
+# Real motor addresses and access codes belong in secrets.toml (mode 0600).
+
+[controller]
+warm_connection_s = 30
+metrics_path = "/var/lib/graber-controller/metrics.jsonl"
+metrics_max_bytes = 2000000
+
+[retry]
+attempts = 3
+connect_timeout_s = 15
+gatt_timeout_s = 4
+feedback_timeout_s = 90
+backoff_s = 0.35
+jitter_s = 0.25
+
+# controller_address is the stable BlueZ controller address shown by the
+# diagnostic command. usb_path optionally prevents an unexpected identical
+# controller from satisfying this identity.
+[[adapters]]
+id = "external_a"
+controller_address = "AA:BB:CC:DD:EE:01"
+usb_path = "1-1.2"
+max_connections = 5
+max_cold_connections = 1
+
+[[adapters]]
+id = "external_b"
+controller_address = "AA:BB:CC:DD:EE:02"
+usb_path = "1-1.3"
+max_connections = 5
+max_cold_connections = 1
+
+# Replace examples only after capturing and verifying the private Pi inventory.
+[[blinds]]
+id = "living_left"
+name = "Living Left (Pi Pilot)"
+dual_rail = true
+preferred_adapter = "external_a"
+fallback_adapters = ["external_b"]
+
+[[blinds]]
+id = "living_center"
+name = "Living Center (Pi Pilot)"
+dual_rail = true
+preferred_adapter = "external_a"
+fallback_adapters = ["external_b"]
+
+[[blinds]]
+id = "living_right"
+name = "Living Right (Pi Pilot)"
+dual_rail = false
+preferred_adapter = "external_b"
+fallback_adapters = ["external_a"]
+
+[[groups]]
+id = "living_room"
+name = "Living Room (Pi Pilot)"
+members = ["living_left", "living_center", "living_right"]
+mode = "best_effort"
+prepare_timeout_s = 12
+partial_failure = "release_ready"
+
+[mqtt]
+enabled = false
+host = "homeassistant.local"
+port = 1883
+topic_prefix = "graber_rpi_test"
+discovery_prefix = "homeassistant"
+client_id = "graber-rpi-controller"
+
+[web]
+enabled = true
+host = "0.0.0.0"
+port = 8080
+allow_live_commands = false
+allowed_networks = ["192.168.1.0/24"]

@@ -1,27 +1,26 @@
 # Contributing
 
-Keep protocol observations separate from conclusions, and state the motor model
-and firmware for every new trace. Do not upload access codes, BLE addresses,
-Home Assistant backups, Android bug reports, or HCI captures containing private
-data.
+Keep verified protocol observations separate from inference. For every new
+trace, record motor model/firmware privately and state what remains uncertain.
+Never expose a command merely because its bytes appeared in an uncorrelated
+capture.
 
 Before proposing a change:
 
 ```sh
-cp examples/secrets.yaml.example secrets.yaml
-openssl rand -base64 32
-make test
-make compile-example
-python -m py_compile tools/*.py
+python3 -m venv .venv-linux
+. .venv-linux/bin/activate
+pip install -r linux_controller/requirements-dev.txt
+make check
 ```
 
-Paste the generated key into the `api_key` entry in `secrets.yaml` before
-compiling. Keep that file local; never commit or share the generated key.
+Changes to retries, writes, Stop, feedback completion, adapter assignment, or
+group release need an offline regression test. Never automatically replay a
+command after an effectful write acknowledgement.
 
-Changes to connection scheduling, retries, writes, Stop, or bulk behavior need a
-host-side regression test. Hardware validation should begin with one blind and
-a small movement. Never require users to reset native remotes for BLE testing.
+Hardware validation starts only after offline tests and adapter diagnostics.
+Begin with advertisements, then one supervised blind and a small movement.
+Never reset/re-pair a motor or run two automated controllers against one blind.
 
-The repository is licensed under the MIT License. Contributions are accepted
-through the private project repository and should continue to exclude all
-device-specific secrets and identifiers.
+Do not commit access codes, BLE/controller identities, room assignments,
+private captures, MQTT credentials, HA backups, or household network details.

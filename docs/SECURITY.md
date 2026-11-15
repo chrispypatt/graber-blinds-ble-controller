@@ -1,23 +1,29 @@
 # Security and privacy
 
-Treat each motor's seven-digit access code as a secret. BLE MAC addresses and
-room assignments are also private inventory data. Never commit any of them to a
-public repository, issue, CI log, or support bundle.
+Treat motor access codes, motor/controller Bluetooth addresses, USB serials,
+room assignments, MQTT credentials, web tokens, and Home Assistant mappings as
+private household inventory.
 
-Keep these values in ESPHome's ignored `secrets.yaml`. The example secrets file
-contains unmistakable placeholders only; it must never be copied as a working
-configuration. Generated production YAML may reference secret names but must
-never contain the resolved values.
+Store topology in `/etc/graber-controller/config.toml` and credentials in
+`secrets.toml`. The secrets file must have no group/other permissions; the
+installer uses mode `0600` owned by the unprivileged `graber` user. Local config
+and `private/` paths are ignored by Git.
 
-The identification firmware intentionally logs discovered `RRBZ_*` names,
-BLE MAC addresses, RSSI, and advertised positions because those values are
-needed to map motors to rooms. Treat those logs as private inventory data:
-keep them out of public repositories, CI artifacts, screenshots, and support
-issues. Delete or redact them before sharing diagnostics.
+The web listener is CIDR-restricted. Live controller or identification-jog
+actions additionally require a non-placeholder private token and explicit live
+gate. Do not port-forward either UI. They use plain HTTP on the trusted LAN; add
+a separately managed authenticated TLS reverse proxy if encryption is needed.
 
-Raw Android bug reports, HCI snoop captures, GATT dumps, and Home Assistant
-backups can contain account data and identifiers. The repository ignores common
-capture and archive formats, but review every staged file before publishing:
+MQTT movement commands are never retained. Duplicate QoS deliveries reuse an
+in-memory ID, and movement queues do not survive restart. Discovery uses
+separate Pi pilot IDs during migration.
+
+Identification output is redacted by default. Full captures require an explicit
+path and are mode `0600`; candidate access-code reads require another explicit
+flag. Ordinary identification never writes GATT or changes motor associations.
+
+HCI captures, mobile diagnostics, journals, metrics, HA backups, and screenshots
+may contain private data. Inspect every staged file before publishing:
 
 ```sh
 git status --short
@@ -25,5 +31,4 @@ git diff --cached
 git grep -nE '[0-9]{7}|([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}'
 ```
 
-The last command also finds harmless examples; inspect every match rather than
-assuming a clean exit is sufficient.
+Matches include placeholders/tests, so inspect each result.

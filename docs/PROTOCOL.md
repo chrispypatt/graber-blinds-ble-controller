@@ -4,6 +4,11 @@ This project is based on observations from RRBZ/P3 motors running firmware
 `V01.10_250705`. It is not an official Graber specification. Other hardware or
 firmware may differ.
 
+The historical C++ dispatcher referenced below is preserved on the
+`esp-controller` branch; it is not part of this Raspberry Pi-only branch. Its
+tested byte ordering and timing remain protocol research inputs, not Linux
+architecture constraints.
+
 ## Known characteristics
 
 | Purpose | Service | Characteristic |

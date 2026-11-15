@@ -1,0 +1,43 @@
+[Unit]
+Description=Graber BLE controller
+Documentation=https://github.com/chrispypatt/graber-blinds-ble-controller
+Wants=bluetooth.service network-online.target
+After=bluetooth.service network-online.target
+
+[Service]
+Type=simple
+User=graber
+Group=graber
+SupplementaryGroups=bluetooth
+WorkingDirectory=/opt/graber-controller
+Environment=PYTHONPATH=/opt/graber-controller
+EnvironmentFile=-/etc/graber-controller/environment
+ExecStart=/opt/graber-controller/.venv/bin/python -m graber.main --config /etc/graber-controller/config.toml --secrets /etc/graber-controller/secrets.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=25s
+KillSignal=SIGINT
+StateDirectory=graber-controller
+UMask=0027
+
+# BlueZ is accessed over the system D-Bus; the service does not need root.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/graber-controller
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+
+[Install]
+WantedBy=multi-user.target

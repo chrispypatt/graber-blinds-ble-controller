@@ -1,4 +1,4 @@
-name: Validate
+name: Validate Raspberry Pi controller
 
 on:
   push:
@@ -12,33 +12,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install ESPHome
-        run: pip install esphome==2026.10.2
-      - name: Prepare example secrets
-        run: |
-          cp examples/secrets.yaml.example secrets.yaml
-          python3 - <<'PY'
-          import base64
-          import re
-          import secrets
-          from pathlib import Path
-
-          path = Path("secrets.yaml")
-          content = path.read_text()
-          key = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
-          content, count = re.subn(
-              r"(?m)^api_key:.*$",
-              f'api_key: "{key}"',
-              content,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit("Expected one api_key entry in example secrets")
-          path.write_text(content)
-          PY
-      - name: Run dispatcher tests
-        run: make test
-      - name: Compile mixed single/TDBU example
-        run: make compile-example
-      - name: Check discovery tool syntax
-        run: python -m py_compile tools/*.py
+      - name: Install controller and test dependencies
+        run: pip install -r linux_controller/requirements-dev.txt
+      - name: Run Phase A tests and static checks
+        run: make check
