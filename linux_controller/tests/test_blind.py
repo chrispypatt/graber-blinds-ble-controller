@@ -12,7 +12,8 @@ from graber.protocol import (
 
 
 class FakeConnection:
-    def __init__(self, reads=None, execute=True, fail_on_write=None, delay_on_write=None):
+    def __init__(self, reads=None, execute=True, fail_on_write=None, delay_on_write=None,
+                 disconnect_error=None):
         self.is_up = True
         self.writes = []
         self.notifications = {}
@@ -21,6 +22,7 @@ class FakeConnection:
         self.fail_on_write = fail_on_write
         self.delay_on_write = delay_on_write or {}
         self.write_times = []
+        self.disconnect_error = disconnect_error
 
     @property
     def connected(self):
@@ -41,6 +43,8 @@ class FakeConnection:
 
     async def disconnect(self):
         self.is_up = False
+        if self.disconnect_error:
+            raise self.disconnect_error
 
     def has_characteristic(self, characteristic):
         return self.execute
@@ -87,6 +91,17 @@ def test_connect_subscribe_auth_then_verified_command():
         assert BOTTOM_POSITION_CHARACTERISTIC in connection.notifications
         assert result.adapter_id == "external"
         await blind.close()
+    asyncio.run(scenario())
+
+
+def test_disconnect_cleanup_error_does_not_mask_completed_command():
+    async def scenario():
+        connection = FakeConnection(disconnect_error=EOFError())
+        blind = make_controller(connection)
+        result = await blind.execute(BlindCommand("one", CommandKind.SET_POSITION, Rail.BOTTOM, 42))
+        assert result.outcome is Outcome.COMPLETED
+        await blind.close()
+        assert not connection.connected
     asyncio.run(scenario())
 
 

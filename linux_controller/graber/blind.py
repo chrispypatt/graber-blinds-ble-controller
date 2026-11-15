@@ -436,6 +436,11 @@ class BlindController:
             session.close_task.cancel()
         try:
             await session.connection.disconnect()
+        except Exception as exc:
+            # Disconnect is cleanup. BlueZ may already have torn down the D-Bus
+            # connection; that must not replace a completed command result.
+            self._emit("disconnect_cleanup_failed", adapter_id=session.adapter.config.id,
+                       error=f"{type(exc).__name__}: {exc}")
         finally:
             session.adapter.connection_slots.release()
             self._emit("disconnected", adapter_id=session.adapter.config.id,

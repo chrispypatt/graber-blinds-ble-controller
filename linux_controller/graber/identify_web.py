@@ -166,6 +166,7 @@ class SetupSession:
             ],
             "devices": [item.browser_dict(self.allow_code_read) for item in self.devices.values()],
             "allow_jog": allow_jog,
+            "busy": self.ble_lock.locked(),
             "allow_code_read": self.allow_code_read,
             "can_export": self.export_dir is not None,
         }
@@ -372,7 +373,17 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
         if session.ble_lock.locked():
             raise web.HTTPConflict(text="another setup Bluetooth operation is already running")
         async with session.ble_lock:
-            return web.json_response(await jogger(session, key))
+            try:
+                result = await asyncio.wait_for(jogger(session, key), timeout=75)
+            except asyncio.TimeoutError as exc:
+                raise web.HTTPGatewayTimeout(
+                    text="jog timed out; the setup lock was released"
+                ) from exc
+            except Exception as exc:
+                raise web.HTTPInternalServerError(
+                    text=f"jog failed during {type(exc).__name__}; the setup lock was released"
+                ) from exc
+            return web.json_response(result)
 
     async def export(request: Any) -> Any:
         authorize(request)

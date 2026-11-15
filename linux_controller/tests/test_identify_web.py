@@ -194,6 +194,10 @@ def test_web_jog_calls_injected_runner_only_when_enabled(tmp_path: Path):
         )))
         await client.start_server()
         try:
+            state = await client.get(
+                "/api/state", headers={"X-Graber-Control-Token": "0123456789abcdef"}
+            )
+            assert (await state.json())["busy"] is False
             response = await client.post(
                 f"/api/devices/{key}/jog",
                 headers={"X-Graber-Control-Token": "0123456789abcdef"},
