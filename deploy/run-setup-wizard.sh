@@ -52,6 +52,11 @@ done
 for address in $GRABER_SETUP_CONTROLLER_ADDRESSES; do
   set -- "$@" --controller-address "$address"
 done
+if [ -n "${GRABER_SETUP_GROUP_NAMES:-}" ]; then
+  for group_name in $GRABER_SETUP_GROUP_NAMES; do
+    set -- "$@" --group-name "$group_name"
+  done
+fi
 IFS=$old_ifs
 
 if [ "${GRABER_SETUP_ALLOW_CODE_READ:-false}" = true ]; then

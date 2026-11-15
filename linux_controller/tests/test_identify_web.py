@@ -14,7 +14,9 @@ def make_session(tmp_path: Path) -> tuple[SetupSession, str]:
         "hci4", "AA:BB:CC:DD:EE:FF", True, "1234", "5678",
         usb_product="FSC-BP119", usb_serial="adapter-a", usb_path="1-2.3",
     )
-    session = SetupSession([adapter], export_dir=tmp_path)
+    session = SetupSession(
+        [adapter], export_dir=tmp_path, group_names=("Living Room", "Dining")
+    )
     observation = MotorObservation("RRBZ_TEST", "11:22:33:44:55:66", [-60], 40, 70)
     key = opaque_id(observation.address)
     session.devices[key] = DeviceSetup(
@@ -34,6 +36,39 @@ def test_setup_configuration_never_returns_access_code_to_browser(tmp_path: Path
     assert "firmware" not in browser
     assert "battery" not in browser
     assert "motor_type_candidate" not in browser
+    assert session.state(allow_jog=False)["groups"] == [
+        {"id": "living_room", "name": "Living Room"},
+        {"id": "dining", "name": "Dining"},
+    ]
+
+
+def test_name_generates_id_and_group_must_come_from_catalog(tmp_path: Path):
+    session, key = make_session(tmp_path)
+    session.configure(key, {"name": "Living East", "id": "client_override", "group": "dining"})
+    device = session.devices[key]
+    assert device.id == "living_east"
+    assert device.group == "dining"
+    try:
+        session.configure(key, {"group": "invented_group"})
+    except ValueError as exc:
+        assert "unknown group" in str(exc)
+    else:
+        raise AssertionError("unknown group should be rejected")
+
+
+def test_generated_id_collision_is_rejected_on_save(tmp_path: Path):
+    session, key = make_session(tmp_path)
+    second = MotorObservation("RRBZ_OTHER", "11:22:33:44:55:77", [-60], 20, 80)
+    second_key = opaque_id(second.address)
+    session.devices[second_key] = DeviceSetup(
+        second, "other", "Other", False, "usb_1_2_3", group=""
+    )
+    try:
+        session.configure(second_key, {"name": "Living Left"})
+    except ValueError as exc:
+        assert "living_left" in str(exc)
+    else:
+        raise AssertionError("duplicate generated id should be rejected")
 
 
 def test_known_credentials_prefill_by_address_but_never_reach_browser(tmp_path: Path):
@@ -129,13 +164,23 @@ def test_candidate_code_requires_explicit_selection(tmp_path: Path):
 
 def test_export_writes_valid_split_config_and_mode_0600_secrets(tmp_path: Path):
     session, key = make_session(tmp_path)
-    session.configure(key, {"access_code": "0123456", "group": "living room"})
+    session.configure(key, {"access_code": "0123456", "group": "living_room"})
     config_path, secrets_path = session.export()
     assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600
     loaded = load_config(config_path, secrets_path)
     assert loaded.blinds[0].id == "living_left"
     assert loaded.blinds[0].access_code == "0123456"
     assert loaded.groups[0].id == "living_room"
+    assert loaded.groups[0].name == "Living Room"
+
+
+def test_export_omits_group_for_no_group_selection(tmp_path: Path):
+    session, key = make_session(tmp_path)
+    session.configure(key, {"access_code": "0123456", "name": "Solo", "group": ""})
+    config_path, secrets_path = session.export()
+    loaded = load_config(config_path, secrets_path)
+    assert loaded.blinds[0].id == "solo"
+    assert loaded.groups == ()
 
 
 def test_export_refuses_missing_credentials(tmp_path: Path):

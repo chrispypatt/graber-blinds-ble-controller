@@ -87,7 +87,7 @@ class DeviceSetup:
     friendly_name: str
     dual_rail: bool
     preferred_adapter: str
-    group: str = "living_room"
+    group: str = ""
     enabled: bool = True
     access_code: str | None = field(default=None, repr=False)
 
@@ -122,11 +122,21 @@ class DeviceSetup:
 class SetupSession:
     def __init__(self, adapters: list[AdapterIdentity], *, allow_code_read: bool = False,
                  export_dir: str | Path | None = None,
-                 known_credentials: dict[str, str] | None = None):
+                 known_credentials: dict[str, str] | None = None,
+                 group_names: tuple[str, ...] = ()):
         self.adapters = {item.address or item.hci_name: item for item in adapters}
         self.allow_code_read = allow_code_read
         self.export_dir = Path(export_dir).resolve() if export_dir else None
         self.known_credentials = dict(known_credentials or {})
+        self.groups: dict[str, str] = {}
+        for name in group_names:
+            friendly = name.strip()
+            if not friendly:
+                continue
+            group_id = slug(friendly)
+            if group_id in self.groups:
+                raise ValueError(f"duplicate group id generated from {friendly!r}")
+            self.groups[group_id] = friendly
         self.devices: dict[str, DeviceSetup] = {}
         self.ble_lock = asyncio.Lock()
 
@@ -146,6 +156,7 @@ class SetupSession:
                     default_id = slug(motor.name)
                     self.devices[key] = DeviceSetup(
                         motor, default_id, motor.name, False, adapter_id,
+                        group="",
                         access_code=self.known_credentials.get(motor.address.upper()),
                     )
 
@@ -161,6 +172,8 @@ class SetupSession:
                 for item in self.adapters.values()
             ],
             "devices": [item.browser_dict(self.allow_code_read) for item in self.devices.values()],
+            "groups": [{"id": group_id, "name": name}
+                       for group_id, name in self.groups.items()],
             "allow_jog": allow_jog,
             "busy": self.ble_lock.locked(),
             "allow_code_read": self.allow_code_read,
@@ -169,15 +182,21 @@ class SetupSession:
 
     def configure(self, key: str, body: dict[str, Any]) -> None:
         device = self.devices[key]
-        device.id = slug(str(body.get("id", device.id)))
         device.friendly_name = str(body.get("name", device.friendly_name)).strip() or device.friendly_name
+        generated_id = slug(device.friendly_name)
+        if any(other is not device and other.id == generated_id for other in self.devices.values()):
+            raise ValueError(f"another device already uses generated id {generated_id!r}")
+        device.id = generated_id
         device.dual_rail = bool(body.get("dual_rail", device.dual_rail))
         requested = str(body.get("preferred_adapter", device.preferred_adapter))
         valid = {slug(f"usb_{x.usb_path or x.address or x.hci_name}") for x in self.adapters.values()}
         if requested not in valid:
             raise ValueError("unknown adapter assignment")
         device.preferred_adapter = requested
-        device.group = slug(str(body.get("group", device.group)))
+        requested_group = str(body.get("group", device.group))
+        if requested_group and requested_group not in self.groups:
+            raise ValueError("unknown group selection")
+        device.group = requested_group
         device.enabled = bool(body.get("enabled", device.enabled))
         code = str(body.get("access_code", ""))
         if code:
@@ -240,10 +259,12 @@ class SetupSession:
             ])
         groups: dict[str, list[str]] = {}
         for item in selected:
-            groups.setdefault(item.group, []).append(item.id)
+            if item.group:
+                groups.setdefault(item.group, []).append(item.id)
         for group, members in groups.items():
             lines.extend([
-                "[[groups]]", f'id = {json.dumps(group)}', f'name = {json.dumps(group.replace("_", " ").title())}',
+                "[[groups]]", f'id = {json.dumps(group)}',
+                f'name = {json.dumps(self.groups.get(group, group.replace("_", " ").title()))}',
                 f'members = {json.dumps(members)}', 'mode = "best_effort"', "",
             ])
         lines.extend(["[mqtt]", "enabled = false", "", "[web]", "enabled = false", ""])
@@ -413,6 +434,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--export-dir")
     parser.add_argument("--known-secrets",
                         help="mode-0600 controller secrets TOML used to prefill codes by address")
+    parser.add_argument("--group-name", action="append", default=[],
+                        help="friendly group choice; repeat for each configured group")
     args = parser.parse_args(argv)
     token = os.environ.get("GRABER_SETUP_TOKEN")
     if not token or len(token) < 16:
@@ -430,9 +453,11 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("at least one --allowed-network is required for a non-loopback bind")
     settings = SetupWebSettings(args.host, args.port, networks, args.allow_jog, token)
     known_credentials = load_known_credentials(args.known_secrets) if args.known_secrets else {}
+    group_names = tuple(args.group_name or ("Living", "Dining"))
     web.run_app(create_app(SetupSession(adapters, allow_code_read=args.allow_code_read,
                                         export_dir=args.export_dir,
-                                        known_credentials=known_credentials), settings),
+                                        known_credentials=known_credentials,
+                                        group_names=group_names), settings),
                 host=args.host, port=args.port, access_log=None)
 
 
