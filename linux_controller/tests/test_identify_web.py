@@ -31,6 +31,9 @@ def test_setup_configuration_never_returns_access_code_to_browser(tmp_path: Path
     assert "access_code" not in browser
     assert browser["bottom_position"] == 40
     assert browser["top_position"] == 30
+    assert "firmware" not in browser
+    assert "battery" not in browser
+    assert "motor_type_candidate" not in browser
 
 
 def test_known_credentials_prefill_by_address_but_never_reach_browser(tmp_path: Path):

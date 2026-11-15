@@ -106,7 +106,6 @@ class DeviceSetup:
             "id": self.id,
             "name": self.friendly_name,
             "dual_rail": self.dual_rail,
-            "motor_type_candidate": self.observation.motor_type_candidate,
             "preferred_adapter": self.preferred_adapter,
             "group": self.group,
             "enabled": self.enabled,
@@ -115,11 +114,8 @@ class DeviceSetup:
             "bottom_position": bottom_position,
             "top_position": top_position,
             "rssi_median": self.observation.rssi_median,
-            "firmware": self.observation.firmware,
-            "battery": self.observation.battery,
             "has_access_code": self.access_code is not None,
             "candidate_code_available": allow_code_read and self.observation.candidate_access_code is not None,
-            "inspection_errors": self.observation.inspection_errors,
         }
 
 
@@ -332,9 +328,12 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
         if not any(remote in network for network in networks):
             return web.json_response({"error": "outside allowed networks"}, status=403)
         try:
-            return await handler(request)
+            response = await handler(request)
         except (KeyError, ValueError) as exc:
-            return web.json_response({"error": str(exc)}, status=400)
+            response = web.json_response({"error": str(exc)}, status=400)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
     def authorize(request: Any) -> None:
         if not settings.control_token or not secrets.compare_digest(
