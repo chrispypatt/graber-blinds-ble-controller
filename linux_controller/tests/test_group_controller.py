@@ -149,6 +149,43 @@ def test_explicit_target_type_disambiguates_same_blind_and_group_id():
     asyncio.run(scenario())
 
 
+def test_tdbu_only_commands_fail_before_dispatch_for_single_rail_targets():
+    async def scenario():
+        single = FakeDispatcher("single")
+        dual = FakeDispatcher("dual")
+        dual.blind.config.dual_rail = True
+        controller = Controller(
+            {"single": single, "dual": dual},
+            (GroupConfig("mixed", "Mixed", ("single", "dual")),),
+        )
+
+        for target_id, target_type, action in (
+            ("single", "blind", "open_top"),
+            ("mixed", "group", "stack_up"),
+        ):
+            try:
+                await controller.submit_command(
+                    target_id, action, target_type=target_type
+                )
+            except ValueError as exc:
+                assert "TDBU" in str(exc)
+            else:
+                raise AssertionError(f"{action} should be rejected before dispatch")
+
+        assert single.commands == []
+        assert dual.commands == []
+
+        await controller.submit_command("single", "favorite", target_type="blind")
+        group_result = await controller.submit_command(
+            "mixed", "favorite", target_type="group"
+        )
+        assert single.commands[-1].kind is CommandKind.FAVORITE
+        assert dual.commands[-1].kind is CommandKind.FAVORITE
+        assert group_result.successful
+
+    asyncio.run(scenario())
+
+
 def test_synchronized_group_stop_skips_readiness_preparation():
     async def scenario():
         dispatchers = {

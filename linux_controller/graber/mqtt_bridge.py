@@ -92,6 +92,8 @@ class MqttBridge:
         self.adapter_health_provider = adapter_health_provider or (lambda: {})
         self.groups = dict(groups or {})
         self._mqtt_ids: OrderedDict[tuple[str, int], str] = OrderedDict()
+        self._published_discovery_topics: set[str] = set()
+        self._current_discovery_topics: set[str] | None = None
 
     def command_id_for_delivery(self, topic: str, mid: int, duplicate: bool) -> str:
         key = (topic, mid)
@@ -113,6 +115,9 @@ class MqttBridge:
 
     def group_command_topic(self, group_id: str) -> str:
         return f"{self.settings.topic_prefix}/group/{group_id}/command"
+
+    def action_command_topic(self, target_id: str, target_type: str, action: str) -> str:
+        return f"{self.settings.topic_prefix}/{target_type}/{target_id}/action/{action}"
 
     def _blind_availability(self, blind_id: str) -> list[dict[str, str]]:
         return [
@@ -145,6 +150,9 @@ class MqttBridge:
 
     def publish_discovery(self) -> None:
         """Publish retained, non-optimistic Home Assistant entities."""
+        previous_topics = self._published_discovery_topics
+        current_topics: set[str] = set()
+        self._current_discovery_topics = current_topics
         device = {
             "identifiers": [self.settings.device_id],
             "name": self.settings.device_name,
@@ -170,7 +178,7 @@ class MqttBridge:
                     "optimistic": False,
                 }
                 topic = f"{self.settings.discovery_prefix}/cover/{entity_id}/config"
-                self._publish(topic, payload, retain=True)
+                self._publish_discovery(topic, payload)
 
             diagnostic_id = _slug(f"{self.settings.device_id}_{blind.blind_id}_diagnostics")
             diagnostic = {
@@ -184,10 +192,9 @@ class MqttBridge:
                 "availability": self._blind_availability(blind.blind_id),
                 "availability_mode": "all",
             }
-            self._publish(
+            self._publish_discovery(
                 f"{self.settings.discovery_prefix}/sensor/{diagnostic_id}/config",
                 diagnostic,
-                retain=True,
             )
             for key, label, unit, device_class in (
                 ("battery", "Battery", "%", "battery"),
@@ -210,14 +217,26 @@ class MqttBridge:
                     sensor["unit_of_measurement"] = unit
                 if device_class:
                     sensor["device_class"] = device_class
-                self._publish(
+                self._publish_discovery(
                     f"{self.settings.discovery_prefix}/sensor/{sensor_id}/config",
                     sensor,
-                    retain=True,
                 )
+            self._publish_action_buttons(
+                "blind",
+                blind.blind_id,
+                blind.name,
+                ("favorite", "stack_up", "stack_down") if blind.tdbu else ("favorite",),
+                device,
+                availability=self._blind_availability(blind.blind_id),
+            )
+            if not blind.tdbu:
+                self._clear_stack_discovery("blind", blind.blind_id)
         for group in self.groups.values():
+            if len(group.members) < 2:
+                self._clear_group_discovery(group.group_id)
+                continue
             entity_id = _slug(f"{self.settings.device_id}_group_{group.group_id}")
-            self._publish(
+            self._publish_discovery(
                 f"{self.settings.discovery_prefix}/cover/{entity_id}/config",
                 {
                     "name": f"{group.name}{self.settings.entity_name_suffix}",
@@ -229,11 +248,33 @@ class MqttBridge:
                     "payload_not_available": "offline",
                     "optimistic": False,
                 },
-                retain=True,
             )
+            all_tdbu = bool(group.members) and all(
+                member in self.blinds and self.blinds[member].tdbu
+                for member in group.members
+            )
+            if all_tdbu:
+                self._publish_action_buttons(
+                    "group",
+                    group.group_id,
+                    group.name,
+                    ("favorite", "stack_up", "stack_down"),
+                    device,
+                    availability_topic=self.availability_topic,
+                )
+            else:
+                self._publish_action_buttons(
+                    "group",
+                    group.group_id,
+                    group.name,
+                    ("favorite",),
+                    device,
+                    availability_topic=self.availability_topic,
+                )
+                self._clear_stack_discovery("group", group.group_id)
         for adapter_id in self.adapters:
             entity_id = _slug(f"{self.settings.device_id}_{adapter_id}_health")
-            self._publish(
+            self._publish_discovery(
                 f"{self.settings.discovery_prefix}/sensor/{entity_id}/config",
                 {
                     "name": f"{adapter_id} Bluetooth Health",
@@ -245,10 +286,82 @@ class MqttBridge:
                     "entity_category": "diagnostic",
                     "availability_topic": self.availability_topic,
                 },
-                retain=True,
             )
             health = self.adapter_health_provider().get(adapter_id, {"status": "unknown"})
             self.publish_adapter_health(adapter_id, health)
+        self._current_discovery_topics = None
+        for topic in previous_topics - current_topics:
+            self.client.publish(topic, "", qos=self.settings.qos, retain=True)
+        self._published_discovery_topics = current_topics
+
+    def _clear_group_discovery(self, group_id: str) -> None:
+        entity_id = _slug(f"{self.settings.device_id}_group_{group_id}")
+        self.client.publish(
+            f"{self.settings.discovery_prefix}/cover/{entity_id}/config",
+            "",
+            qos=self.settings.qos,
+            retain=True,
+        )
+        for action in ("favorite", "stack_up", "stack_down"):
+            action_id = _slug(
+                f"{self.settings.device_id}_group_{group_id}_{action}"
+            )
+            self.client.publish(
+                f"{self.settings.discovery_prefix}/button/{action_id}/config",
+                "",
+                qos=self.settings.qos,
+                retain=True,
+            )
+
+    def _clear_stack_discovery(self, target_type: str, target_id: str) -> None:
+        for action in ("stack_up", "stack_down"):
+            entity_id = _slug(
+                f"{self.settings.device_id}_{target_type}_{target_id}_{action}"
+            )
+            self.client.publish(
+                f"{self.settings.discovery_prefix}/button/{entity_id}/config",
+                "",
+                qos=self.settings.qos,
+                retain=True,
+            )
+
+    def _publish_action_buttons(
+        self,
+        target_type: str,
+        target_id: str,
+        target_name: str,
+        actions: tuple[str, ...],
+        device: Mapping[str, Any],
+        *,
+        availability: list[dict[str, str]] | None = None,
+        availability_topic: str | None = None,
+    ) -> None:
+        labels = {"favorite": "Favorite", "stack_up": "Stack Up", "stack_down": "Stack Down"}
+        for action in actions:
+            entity_id = _slug(
+                f"{self.settings.device_id}_{target_type}_{target_id}_{action}"
+            )
+            payload: dict[str, Any] = {
+                "name": f"{target_name} {labels[action]}{self.settings.entity_name_suffix}",
+                "unique_id": entity_id,
+                "device": device,
+                "command_topic": self.action_command_topic(
+                    target_id, target_type, action
+                ),
+                "payload_press": "PRESS",
+                "qos": self.settings.qos,
+            }
+            if availability is not None:
+                payload["availability"] = availability
+                payload["availability_mode"] = "all"
+            elif availability_topic is not None:
+                payload["availability_topic"] = availability_topic
+                payload["payload_available"] = "online"
+                payload["payload_not_available"] = "offline"
+            self._publish_discovery(
+                f"{self.settings.discovery_prefix}/button/{entity_id}/config",
+                payload,
+            )
 
     def subscribe_commands(self) -> None:
         for blind in self.blinds.values():
@@ -260,6 +373,27 @@ class MqttBridge:
                 )
         for group in self.groups.values():
             self.client.subscribe(self.group_command_topic(group.group_id), self.settings.qos)
+        for blind in self.blinds.values():
+            actions = ("favorite", "stack_up", "stack_down") if blind.tdbu else ("favorite",)
+            for action in actions:
+                self.client.subscribe(
+                    self.action_command_topic(blind.blind_id, "blind", action),
+                    self.settings.qos,
+                )
+        for group in self.groups.values():
+            all_tdbu = len(group.members) >= 2 and all(
+                member in self.blinds and self.blinds[member].tdbu
+                for member in group.members
+            )
+            if len(group.members) < 2:
+                actions = ()
+            else:
+                actions = ("favorite", "stack_up", "stack_down") if all_tdbu else ("favorite",)
+            for action in actions:
+                self.client.subscribe(
+                    self.action_command_topic(group.group_id, "group", action),
+                    self.settings.qos,
+                )
 
     async def handle_message(self, topic: str, payload: bytes | str, *, retained: bool = False,
                              command_id: str | None = None) -> bool:
@@ -271,12 +405,26 @@ class MqttBridge:
         if retained:
             LOG.warning("ignoring retained movement command on %s", topic)
             return False
+        text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+        text = text.strip()
+        action_target = self._parse_action_topic(topic)
+        if action_target is not None:
+            if text.upper() != "PRESS":
+                return False
+            target_id, target_type, action = action_target
+            await self.controller.submit_command(
+                target_id,
+                action,
+                position=None,
+                command_id=command_id or uuid.uuid4().hex,
+                source="mqtt",
+                target_type=target_type,
+            )
+            return True
         parsed = self._parse_command_topic(topic)
         if parsed is None:
             return False
         target_id, target_type, rail, is_position = parsed
-        text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
-        text = text.strip()
         position: int | None = None
         if is_position:
             try:
@@ -307,6 +455,34 @@ class MqttBridge:
             target_type=target_type,
         )
         return True
+
+    def _parse_action_topic(self, topic: str) -> tuple[str, str, str] | None:
+        prefix = f"{self.settings.topic_prefix}/"
+        if not topic.startswith(prefix):
+            return None
+        parts = topic[len(prefix) :].split("/")
+        if len(parts) != 4 or parts[0] not in {"blind", "group"} or parts[2] != "action":
+            return None
+        target_type, target_id, _, action = parts
+        if target_type == "blind":
+            target = self.blinds.get(target_id)
+            allowed = {"favorite", "stack_up", "stack_down"} if target and target.tdbu else {"favorite"}
+            if target is None or action not in allowed:
+                return None
+        else:
+            group = self.groups.get(target_id)
+            if group is None:
+                return None
+            if len(group.members) < 2:
+                return None
+            all_tdbu = all(
+                member in self.blinds and self.blinds[member].tdbu
+                for member in group.members
+            )
+            allowed = {"favorite", "stack_up", "stack_down"} if all_tdbu else {"favorite"}
+            if action not in allowed:
+                return None
+        return target_id, target_type, action
 
     def _parse_command_topic(self, topic: str) -> tuple[str, str, str, bool] | None:
         group_prefix = f"{self.settings.topic_prefix}/group/"
@@ -382,6 +558,12 @@ class MqttBridge:
         serialized = payload if isinstance(payload, str) else json.dumps(payload, separators=(",", ":"))
         self.client.publish(topic, serialized, qos=self.settings.qos, retain=retain)
 
+    def _publish_discovery(self, topic: str, payload: Mapping[str, Any]) -> None:
+        if self._current_discovery_topics is None:
+            raise RuntimeError("discovery publication is not active")
+        self._current_discovery_topics.add(topic)
+        self._publish(topic, payload, retain=True)
+
 
 def attach_paho_callbacks(
     bridge: MqttBridge,
@@ -409,7 +591,7 @@ def attach_paho_callbacks(
             report_error(error)
 
     def on_connect(_client: Any, _userdata: Any, _flags: Any, reason_code: Any, *_: Any) -> None:
-        if int(reason_code) == 0:
+        if reason_code == 0:
             bridge.subscribe_commands()
             bridge.publish_discovery()
             bridge.publish_availability(True)

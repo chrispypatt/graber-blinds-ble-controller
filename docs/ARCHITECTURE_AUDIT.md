@@ -17,12 +17,13 @@ implementation retains:
 - Bottom and top absolute target writes followed by the rail-specific `0x14`
   execute write. Top values are inverted only at the Home Assistant/UI boundary.
 - Stop writes to both direct-command and Execute when both exist.
-- The captured TDBU full-open, full-close, Favorite, preset, and fixed five-point
+- The captured TDBU full-open, full-close, preset, and fixed five-point
   Stack Up/Down sequences, including their inter-write delays.
 - Fresh GATT feedback for command completion. A successful ATT/GATT write is
   delivery evidence, not proof that a motor moved or reached its target.
 - The explicit limitation that arbitrary paired absolute TDBU targets are not
-  verified. Favorite is verified only on the tested TDBU firmware. Experimental
+  verified. Favorite uses the reference dispatcher's shared single-rail/TDBU
+  sequence. Experimental
   captures must not be exposed as supported commands.
 - Advertisement manufacturer bytes 2 and 3 as candidate bottom/top positions
   only when present and in `0..100`; active operations still require GATT

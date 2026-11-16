@@ -34,8 +34,8 @@ connection creation proved unreliable in testing.
   command characteristic.
 - Top position: write target byte `0..100`, then `0x14` to Execute.
 - Stop: `0x10` to both access/direct command and Execute.
-- Favorite: `0x16` to the access/direct command characteristic on the tested
-  TDBU firmware. Other blind types and firmware variants remain unverified.
+- Favorite: `0x16` to the access/direct command characteristic. The preserved
+  reference dispatcher used this sequence for both single-rail and TDBU shades.
 - Fully open: `0x12` to access/direct command on the tested TDBU firmware.
 - Fully closed: `0x12` to Execute, then `0x13` to access/direct command on the
   tested TDBU firmware (about 45–55 ms apart).
@@ -81,8 +81,9 @@ partner-rail defaulting for individual `0x14` operations. Our captures show
 individual app slider actions and shared `0x18`/`0x19` movement, but do not
 establish persistent coexistence of two arbitrary positions.
 
-Favorite (`0x16`) is validated on the tested TDBU firmware from official-app
-captures. Other blind types and firmware variants remain unverified.
+Favorite (`0x16`) is validated by official-app captures and the preserved
+reference dispatcher, which used the same sequence for single-rail and TDBU
+shades.
 
 Rail direction in Home Assistant is normalized by the package. The raw TDBU
 top value is inverted when exposed as a cover position.

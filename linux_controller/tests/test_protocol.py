@@ -158,5 +158,6 @@ def test_stable_build_command_api_and_explicit_paired_absolute_rejection():
         )
     with pytest.raises(NotImplementedError, match="not verified"):
         protocol.build_command(protocol.CommandKind.PAIRED_ABSOLUTE)
-    with pytest.raises(ValueError, match="only verified"):
-        protocol.build_command(protocol.CommandKind.FAVORITE, dual_rail=False)
+    assert protocol.build_command(
+        protocol.CommandKind.FAVORITE, dual_rail=False
+    ) == protocol.favorite()

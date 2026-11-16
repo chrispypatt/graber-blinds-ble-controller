@@ -110,6 +110,11 @@ class Controller:
         if use_blind:
             if target_id not in self.dispatchers:
                 raise KeyError(f"unknown blind {target_id}")
+            if (
+                self._requires_tdbu(kind, rail)
+                and not self.dispatchers[target_id].blind.config.dual_rail
+            ):
+                raise ValueError(f"{action} requires a TDBU blind")
             result = await self.dispatchers[target_id].submit(
                 BlindCommand(command_id, kind, rail, raw_position, time.time())
             )
@@ -119,10 +124,27 @@ class Controller:
             if target_type == "group":
                 raise KeyError(f"unknown group {target_id}")
             raise KeyError(f"unknown blind/group {target_id}")
+        members = [
+            self.dispatchers[item]
+            for item in self.groups[target_id].members
+            if item in self.dispatchers
+        ]
+        if self._requires_tdbu(kind, rail) and any(
+            not item.blind.config.dual_rail for item in members
+        ):
+            raise ValueError(f"{action} requires an all-TDBU group")
         result = await self._group(self.groups[target_id], command_id, kind, rail, raw_position)
         for member_result in result.results.values():
             self._record_result(member_result)
         return result
+
+    @staticmethod
+    def _requires_tdbu(kind: CommandKind, rail: Rail | None) -> bool:
+        return rail is Rail.TOP or kind in {
+            CommandKind.PRESET,
+            CommandKind.STACK_UP,
+            CommandKind.STACK_DOWN,
+        }
 
     async def _group(self, group: GroupConfig, command_id: str, kind: CommandKind,
                      rail: Rail | None, position: int | None) -> GroupResult:

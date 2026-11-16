@@ -137,7 +137,7 @@ def stop(*, has_execute_characteristic: bool = True) -> tuple[WriteStep, ...]:
 
 
 def favorite() -> tuple[WriteStep, ...]:
-    """Encode Favorite, verified on the documented TDBU firmware only."""
+    """Encode the Favorite command used by the reference dispatcher."""
 
     return (WriteStep(AUTH_CHARACTERISTIC, b"\x16"),)
 
@@ -267,8 +267,6 @@ def build_command(
         available = dual_rail if has_execute_characteristic is None else has_execute_characteristic
         return stop(has_execute_characteristic=available)
     if kind is CommandKind.FAVORITE:
-        if not dual_rail:
-            raise ValueError("favorite is only verified for the documented dual-rail firmware")
         return favorite()
     if kind is CommandKind.FULL_OPEN:
         return full_open(tdbu=dual_rail)
