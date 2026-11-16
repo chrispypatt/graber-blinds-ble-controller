@@ -107,6 +107,7 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
         }, MqttSettings(
             topic_prefix=config.mqtt.topic_prefix, discovery_prefix=config.mqtt.discovery_prefix,
             device_id=config.mqtt.device_id, device_name=config.mqtt.device_name,
+            entity_name_suffix=config.mqtt.entity_name_suffix,
         ), adapters=tuple(item.id for item in config.adapters),
             adapter_health_provider=manager.health,
             groups={

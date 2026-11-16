@@ -64,10 +64,10 @@ enabled by ordinary identification.
 
 Nothing below is fabricated or committed. The private Pi configuration needs:
 
-- The three living-room motors' real BLE identities, seven-digit access codes,
-  rail types, tested firmware, and preferred/fallback adapter assignments.
-- Both FSC-BP119 controller addresses plus USB serial or physical port paths,
-  observed after single-adapter and dual-adapter reboot tests.
+- Each selected pilot motor's real BLE identity, seven-digit access code, rail
+  type, tested firmware, and preferred/fallback adapter assignments.
+- Each external controller address plus USB serial or physical port path,
+  observed after individual and combined reboot tests.
 - MQTT broker host/port, TLS/authentication requirements, and confirmation that
   a broker already exists. This project does not install a broker.
 - Current legacy Home Assistant device and entity IDs, friendly names,
@@ -82,8 +82,8 @@ access codes must not be emitted in MQTT topics, metrics, or logs.
 
 ## Home Assistant pilot treatment
 
-The Pi publishes retained MQTT Discovery documents under a separate pilot
-namespace and stable pilot unique IDs. State is non-optimistic; command topics
+The Pi publishes retained MQTT Discovery documents under a separate migration
+namespace and stable unique IDs. State is non-optimistic; command topics
 are not retained. Existing legacy entities are not renamed, overwritten, or
 deleted. During the pilot, automations must have only one active controller for
 each blind. After acceptance testing, cut over automation targets deliberately,

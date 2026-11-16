@@ -1,8 +1,11 @@
 # Graber BLE controller for Raspberry Pi 5
 
 Local, battery-conscious control of Graber RRBZ motorized shades from Raspberry
-Pi OS Lite using Linux BlueZ, Python asyncio, Bleak, two independently managed
-USB Bluetooth adapters, MQTT Discovery, and a LAN-restricted web interface.
+Pi OS Lite using Linux BlueZ, Python asyncio, Bleak, one or more independently
+managed USB Bluetooth adapters, MQTT Discovery, and a LAN-restricted web
+interface.
+Adapter count, shade inventory, rooms, and groups are deployment configuration;
+the controller does not assume a particular household layout.
 
 This branch is the Raspberry Pi implementation. The former ESP32/ESPHome
 implementation is intentionally absent; it remains preserved on the
@@ -11,7 +14,7 @@ retained in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 Features include single-rail and TDBU control, independent per-blind queues,
 bounded retries, acknowledged-write no-replay safety, configurable warm links,
-stable external-adapter identity/failover, group control, MQTT pilot entities,
+stable external-adapter identity/failover, group control, MQTT Discovery entities,
 a token-gated LAN UI, and read-only identification/reliability tooling.
 
 No real motor address, access code, or Home Assistant identity belongs in this
@@ -62,7 +65,7 @@ data:
 python -m graber.identify_cli \
   --controller-address CONTROLLER_ADDRESS --inspect \
   --read-candidate-access-code \
-  --capture-private private/living-room-inventory.json
+  --capture-private private/shade-inventory.json
 ```
 
 The identification tool also provides a LAN-restricted setup web view for

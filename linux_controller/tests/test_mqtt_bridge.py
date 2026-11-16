@@ -40,7 +40,10 @@ def make_bridge():
             "left": BlindEntity("left", "Living Room Left", tdbu=True),
             "right": BlindEntity("right", "Living Room Right"),
         },
-        MqttSettings(topic_prefix="test-pilot", discovery_prefix="ha"),
+        MqttSettings(
+            topic_prefix="test-pilot", discovery_prefix="ha",
+            entity_name_suffix=" (Test)",
+        ),
         groups={
             "living": GroupEntity("living", "Living Room", ("left", "right")),
         },
@@ -63,7 +66,7 @@ def test_discovery_is_retained_separate_and_non_optimistic():
     assert all(len(payload["availability"]) == 2 for payload in blind_payloads)
     assert all("state_topic" not in payload and "position_topic" not in payload
                for payload in group_payloads)
-    assert all("Pi Pilot" in payload["name"] for payload in payloads)
+    assert all(payload["name"].endswith(" (Test)") for payload in payloads)
     assert len({payload["unique_id"] for payload in payloads}) == 4
     battery = [json.loads(item[1]) for item in client.published if "_battery/config" in item[0]]
     assert len(battery) == 2

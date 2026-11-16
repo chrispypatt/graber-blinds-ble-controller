@@ -26,7 +26,6 @@ esac
 
 : "${GRABER_SETUP_SOURCE_DIR:?missing GRABER_SETUP_SOURCE_DIR}"
 : "${GRABER_SETUP_TOKEN_FILE:?missing GRABER_SETUP_TOKEN_FILE}"
-: "${GRABER_SETUP_CONTROLLER_ADDRESSES:?missing GRABER_SETUP_CONTROLLER_ADDRESSES}"
 : "${GRABER_SETUP_ALLOWED_NETWORKS:?missing GRABER_SETUP_ALLOWED_NETWORKS}"
 : "${GRABER_SETUP_EXPORT_DIR:?missing GRABER_SETUP_EXPORT_DIR}"
 
@@ -42,15 +41,25 @@ python=${GRABER_SETUP_PYTHON:-$GRABER_SETUP_SOURCE_DIR/.venv/bin/python}
 host=${bind_host:-${GRABER_SETUP_HOST:-127.0.0.1}}
 port=${bind_port:-${GRABER_SETUP_PORT:-8090}}
 allowed_networks=${bind_allowed_networks:-$GRABER_SETUP_ALLOWED_NETWORKS}
-export PYTHONPATH=${GRABER_SETUP_PYTHONPATH:-$GRABER_SETUP_SOURCE_DIR/linux_controller}
+export PYTHONPATH=${GRABER_SETUP_PYTHONPATH:-$GRABER_SETUP_SOURCE_DIR}
+controller_addresses=${GRABER_SETUP_CONTROLLER_ADDRESSES:-auto}
+if [ "$controller_addresses" = auto ]; then
+  controller_addresses=$(
+    "$python" -c 'from graber.diagnostics import discover_adapters; print(",".join(x.address for x in discover_adapters() if x.is_usb and x.powered is True and x.address))'
+  )
+  if [ -z "$controller_addresses" ]; then
+    echo "no powered external USB Bluetooth adapters found" >&2
+    exit 1
+  fi
+fi
 
 set -- "$python" -m graber.identify_web \
   --host "$host" --port "$port" --export-dir "$GRABER_SETUP_EXPORT_DIR"
 
-if [ -n "${GRABER_SETUP_KNOWN_SECRETS:-}" ]; then
+if [ -n "${GRABER_SETUP_KNOWN_SECRETS:-}" ] && [ -f "$GRABER_SETUP_KNOWN_SECRETS" ]; then
   set -- "$@" --known-secrets "$GRABER_SETUP_KNOWN_SECRETS"
 fi
-if [ -n "${GRABER_SETUP_EXISTING_CONFIG:-}" ] || [ -n "${GRABER_SETUP_EXISTING_SECRETS:-}" ]; then
+if [ -f "${GRABER_SETUP_EXISTING_CONFIG:-}" ] && [ -f "${GRABER_SETUP_EXISTING_SECRETS:-}" ]; then
   : "${GRABER_SETUP_EXISTING_CONFIG:?missing GRABER_SETUP_EXISTING_CONFIG}"
   : "${GRABER_SETUP_EXISTING_SECRETS:?missing GRABER_SETUP_EXISTING_SECRETS}"
   set -- "$@" --existing-config "$GRABER_SETUP_EXISTING_CONFIG" \
@@ -62,7 +71,7 @@ IFS=,
 for network in $allowed_networks; do
   set -- "$@" --allowed-network "$network"
 done
-for address in $GRABER_SETUP_CONTROLLER_ADDRESSES; do
+for address in $controller_addresses; do
   set -- "$@" --controller-address "$address"
 done
 if [ -n "${GRABER_SETUP_GROUP_NAMES:-}" ]; then

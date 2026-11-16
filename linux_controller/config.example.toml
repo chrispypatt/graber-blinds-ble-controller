@@ -14,6 +14,7 @@ feedback_timeout_s = 90
 backoff_s = 0.35
 jitter_s = 0.25
 
+# These two adapters are illustrative; deployments may configure one or more.
 # controller_address is the stable BlueZ controller address shown by the
 # diagnostic command. usb_path optionally prevents an unexpected identical
 # controller from satisfying this identity.
@@ -31,45 +32,41 @@ usb_path = "1-1.3"
 max_connections = 5
 max_cold_connections = 1
 
-# Replace examples only after capturing and verifying the private Pi inventory.
+# Illustrative shades only. Replace these blocks with the verified private
+# inventory, adding or removing shades and groups as needed.
 [[blinds]]
-id = "living_left"
-name = "Living Left (Pi Pilot)"
-dual_rail = true
-preferred_adapter = "external_a"
-fallback_adapters = ["external_b"]
-
-[[blinds]]
-id = "living_center"
-name = "Living Center (Pi Pilot)"
-dual_rail = true
-preferred_adapter = "external_a"
-fallback_adapters = ["external_b"]
-
-[[blinds]]
-id = "living_right"
-name = "Living Right (Pi Pilot)"
+id = "example_single"
+name = "Example Room Shade"
 dual_rail = false
+preferred_adapter = "external_a"
+fallback_adapters = ["external_b"]
+
+[[blinds]]
+id = "example_tdbu"
+name = "Example TDBU Shade"
+dual_rail = true
 preferred_adapter = "external_b"
 fallback_adapters = ["external_a"]
 
 [[groups]]
-id = "living_room"
-name = "Living Room (Pi Pilot)"
-members = ["living_left", "living_center", "living_right"]
+id = "example_room"
+name = "Example Room"
+members = ["example_single", "example_tdbu"]
 mode = "best_effort"
 prepare_timeout_s = 12
 partial_failure = "release_ready"
 
 [mqtt]
 enabled = false
-host = "homeassistant.local"
+host = "mqtt.example.lan"
 port = 1883
 topic_prefix = "graber_rpi_test"
 discovery_prefix = "homeassistant"
 client_id = "graber-rpi-controller"
 device_id = "graber_rpi_controller"
 device_name = "Graber Raspberry Pi Controller"
+# Optional during a side-by-side migration, for example " (Pi Test)".
+entity_name_suffix = ""
 # For a TLS-enabled broker, set tls = true and provide ca_certs as needed.
 tls = false
 # ca_certs = "/etc/ssl/certs/ca-certificates.crt"

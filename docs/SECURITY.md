@@ -16,7 +16,7 @@ a separately managed authenticated TLS reverse proxy if encryption is needed.
 
 MQTT movement commands are never retained. Duplicate QoS deliveries reuse an
 in-memory ID, and movement queues do not survive restart. Discovery uses
-separate Pi pilot IDs during migration.
+separate controller IDs during migration.
 
 Identification output is redacted by default. Full captures require an explicit
 path and are mode `0600`; candidate access-code reads require another explicit

@@ -1,5 +1,6 @@
 import asyncio
 import stat
+import tomllib
 from pathlib import Path
 
 from graber.config import load_config
@@ -11,6 +12,7 @@ from graber.identify_web import (
     load_known_credentials,
     load_saved_setup,
     opaque_id,
+    select_usb_adapters,
 )
 from graber.identify_web import SetupWebSettings, create_app
 
@@ -29,6 +31,34 @@ def make_session(tmp_path: Path) -> tuple[SetupSession, str]:
         observation, "living_left", "Living Left", True, "usb_1_2_3"
     )
     return session, key
+
+
+def test_adapter_selection_defaults_to_all_powered_usb_and_never_onboard():
+    external_a = AdapterIdentity("hci1", "AA:AA:AA:AA:AA:01", True, "1", "2",
+                                 usb_path="1-1")
+    external_b = AdapterIdentity("hci2", "AA:AA:AA:AA:AA:02", True, "1", "2",
+                                 usb_path="1-2")
+    onboard = AdapterIdentity("hci0", "AA:AA:AA:AA:AA:00", True, None, None)
+    unpowered = AdapterIdentity("hci3", "AA:AA:AA:AA:AA:03", False, "1", "2",
+                                usb_path="1-3")
+
+    assert select_usb_adapters([onboard, external_a, unpowered, external_b], None) == [
+        external_a, external_b,
+    ]
+
+
+def test_explicit_adapter_selection_is_exact_and_validated():
+    external_a = AdapterIdentity("hci1", "AA:AA:AA:AA:AA:01", True, "1", "2",
+                                 usb_path="1-1")
+    external_b = AdapterIdentity("hci2", "AA:AA:AA:AA:AA:02", True, "1", "2",
+                                 usb_path="1-2")
+    assert select_usb_adapters([external_a, external_b], ["aa:aa:aa:aa:aa:02"]) == [external_b]
+    try:
+        select_usb_adapters([external_a, external_b], ["AA:AA:AA:AA:AA:09"])
+    except ValueError as exc:
+        assert "unavailable" in str(exc)
+    else:
+        raise AssertionError("an unavailable explicit controller must fail")
 
 
 def test_setup_configuration_never_returns_access_code_to_browser(tmp_path: Path):
@@ -166,6 +196,103 @@ def test_scan_restores_saved_names_groups_type_adapter_and_code(tmp_path: Path):
     assert device.access_code == "0123456"
     assert restored.groups["main_floor"] == "Main Floor"
     assert restored.groups["whole_house"] == "Whole House"
+
+
+def test_existing_setup_save_preserves_non_topology_config_and_secrets(tmp_path: Path):
+    config_path = tmp_path / "config.toml"
+    secrets_path = tmp_path / "secrets.toml"
+    config_path.write_text(
+        """[controller]
+warm_connection_s = 47
+metrics_path = "/var/lib/graber/metrics.jsonl"
+metrics_max_bytes = 345678
+
+[retry]
+attempts = 5
+connect_timeout_s = 8.5
+gatt_timeout_s = 3.5
+feedback_timeout_s = 42
+backoff_s = 0.7
+jitter_s = 0.1
+
+[[adapters]]
+id = "usb_1_2_3"
+controller_address = "AA:BB:CC:DD:EE:FF"
+usb_path = "1-2.3"
+
+[[blinds]]
+id = "old_name"
+name = "Old Name"
+dual_rail = false
+preferred_adapter = "usb_1_2_3"
+
+[[groups]]
+id = "old_room"
+name = "Old Room"
+members = ["old_name"]
+
+[mqtt]
+enabled = true
+host = "broker.example.lan"
+port = 2883
+topic_prefix = "custom_prefix"
+
+[web]
+enabled = true
+host = "127.0.0.1"
+port = 8181
+allow_live_commands = true
+
+[extension]
+custom_flag = "keep-me"
+"""
+    )
+    secrets_path.write_text(
+        """[blinds.old_name]
+address = "11:22:33:44:55:66"
+access_code = "0123456"
+
+[mqtt]
+username = "controller"
+password = "mqtt-secret"
+
+[web]
+control_token = "0123456789abcdef"
+"""
+    )
+    secrets_path.chmod(0o600)
+    saved = load_saved_setup(config_path, secrets_path)
+    adapter = AdapterIdentity(
+        "hci4", "AA:BB:CC:DD:EE:FF", True, "1234", "5678", usb_path="1-2.3"
+    )
+    session = SetupSession([adapter], export_dir=tmp_path, saved_setup=saved)
+    observation = MotorObservation("RRBZ_TEST", "11:22:33:44:55:66", [-60], 40, 0)
+    key = opaque_id(observation.address)
+    session.devices[key] = DeviceSetup(
+        observation, "new_name", "New Name", False, "usb_1_2_3",
+        groups=("new_room",), configured=True, access_code="0123456",
+    )
+    session.groups["new_room"] = "New Room"
+
+    exported_config, exported_secrets = session.export()
+    loaded = load_config(exported_config, exported_secrets)
+    assert loaded.warm_connection_s == 47
+    assert loaded.metrics_path == "/var/lib/graber/metrics.jsonl"
+    assert loaded.metrics_max_bytes == 345678
+    assert loaded.retry.attempts == 5
+    assert loaded.retry.connect_timeout_s == 8.5
+    assert loaded.mqtt.enabled is True
+    assert loaded.mqtt.host == "broker.example.lan"
+    assert loaded.mqtt.port == 2883
+    assert loaded.mqtt.username == "controller"
+    assert loaded.mqtt.password == "mqtt-secret"
+    assert loaded.web.enabled is True
+    assert loaded.web.port == 8181
+    assert loaded.web.control_token == "0123456789abcdef"
+    assert loaded.blinds[0].id == "new_name"
+    assert loaded.groups[0].id == "new_room"
+    with exported_config.open("rb") as stream:
+        assert tomllib.load(stream)["extension"]["custom_flag"] == "keep-me"
 
 
 def test_scan_can_be_cancelled_and_cleaned_up(tmp_path: Path):

@@ -12,7 +12,9 @@ import secrets
 import stat
 import time
 import tomllib
+from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import date, datetime, time as datetime_time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -144,12 +146,21 @@ class SavedDeviceSetup:
 class SavedSetup:
     devices: dict[str, SavedDeviceSetup]
     groups: dict[str, str]
+    config_base: dict[str, Any] = field(default_factory=dict, repr=False)
+    secrets_base: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 def load_saved_setup(config_path: str | Path, secrets_path: str | Path) -> SavedSetup:
     """Load a previously exported setup without exposing credentials to the UI."""
 
     config = load_config(config_path, secrets_path)
+    with Path(config_path).open("rb") as stream:
+        config_base = tomllib.load(stream)
+    with Path(secrets_path).open("rb") as stream:
+        secrets_base = tomllib.load(stream)
+    for topology_key in ("adapters", "blinds", "groups"):
+        config_base.pop(topology_key, None)
+    secrets_base.pop("blinds", None)
     memberships: dict[str, list[str]] = {blind.id: [] for blind in config.blinds}
     groups = {group.id: group.name for group in config.groups}
     for group in config.groups:
@@ -166,7 +177,89 @@ def load_saved_setup(config_path: str | Path, secrets_path: str | Path) -> Saved
         )
         for blind in config.blinds
     }
-    return SavedSetup(devices=devices, groups=groups)
+    return SavedSetup(devices=devices, groups=groups,
+                      config_base=config_base, secrets_base=secrets_base)
+
+
+def _toml_key(value: str) -> str:
+    return value if re.fullmatch(r"[A-Za-z0-9_-]+", value) else json.dumps(value)
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, (date, datetime, datetime_time)):
+        return value.isoformat()
+    if isinstance(value, list):
+        if any(isinstance(item, dict) for item in value):
+            raise ValueError("nested TOML table arrays are not supported in preserved settings")
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise ValueError(f"unsupported preserved TOML value type: {type(value).__name__}")
+
+
+def _serialize_toml_tables(raw: dict[str, Any]) -> list[str]:
+    """Serialize non-topology settings loaded by tomllib without moving secrets."""
+
+    lines: list[str] = []
+
+    def write_table(path: tuple[str, ...], table: dict[str, Any]) -> None:
+        scalars = {key: value for key, value in table.items() if not isinstance(value, dict)}
+        children = {key: value for key, value in table.items() if isinstance(value, dict)}
+        if path:
+            lines.append("[" + ".".join(_toml_key(part) for part in path) + "]")
+        for key, value in scalars.items():
+            lines.append(f"{_toml_key(str(key))} = {_toml_value(value)}")
+        if path or scalars:
+            lines.append("")
+        for key, value in children.items():
+            write_table((*path, str(key)), value)
+
+    write_table((), raw)
+    return lines
+
+
+def _write_text_no_follow(path: Path, content: str, mode: int) -> None:
+    """Replace a generated file without following an attacker-controlled symlink."""
+
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, mode)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, mode)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def select_usb_adapters(discovered: list[AdapterIdentity],
+                        controller_addresses: list[str] | None) -> list[AdapterIdentity]:
+    """Select powered USB controllers, or validate an explicit address selection."""
+
+    available = [item for item in discovered if item.is_usb and item.powered is True]
+    if not controller_addresses:
+        if not available:
+            raise ValueError("no powered USB Bluetooth adapters found")
+        return available
+    wanted = {value.upper() for value in controller_addresses}
+    selected = [item for item in available if (item.address or "").upper() in wanted]
+    found = {(item.address or "").upper() for item in selected}
+    if found != wanted:
+        raise ValueError(f"configured USB controller(s) unavailable: {sorted(wanted - found)}")
+    return selected
 
 
 class SetupSession:
@@ -372,7 +465,11 @@ class SetupSession:
         self.export_dir.mkdir(parents=True, exist_ok=True)
         config_path, secrets_path = self.export_dir / "config.toml", self.export_dir / "secrets.toml"
         adapter_ids: list[str] = []
-        lines = ["[controller]", "warm_connection_s = 30", "", "[retry]", "attempts = 3", ""]
+        base_config = deepcopy(self.saved_setup.config_base)
+        lines = _serialize_toml_tables(base_config)
+        if not base_config:
+            lines = ["[controller]", "warm_connection_s = 30", "",
+                     "[retry]", "attempts = 3", ""]
         for adapter in self.adapters.values():
             adapter_id = slug(f"usb_{adapter.usb_path or adapter.address or adapter.hci_name}")
             adapter_ids.append(adapter_id)
@@ -402,20 +499,18 @@ class SetupSession:
                 f'name = {json.dumps(self.groups.get(group, group.replace("_", " ").title()))}',
                 f'members = {json.dumps(members)}', 'mode = "best_effort"', "",
             ])
-        lines.extend(["[mqtt]", "enabled = false", "", "[web]", "enabled = false", ""])
-        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        secret_lines: list[str] = []
+        if not base_config:
+            lines.extend(["[mqtt]", "enabled = false", "", "[web]", "enabled = false", ""])
+        secret_lines = _serialize_toml_tables(deepcopy(self.saved_setup.secrets_base))
         for item in selected:
             secret_lines.extend([
                 f"[blinds.{item.id}]", f'address = {json.dumps(item.observation.address)}',
                 f'access_code = {json.dumps(item.access_code)}', "",
             ])
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(secrets_path, flags, 0o600)
-        os.chmod(secrets_path, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write("\n".join(secret_lines))
-        os.chmod(secrets_path, 0o600)
+        config_content = "\n".join(lines) + "\n"
+        secrets_content = "\n".join(secret_lines)
+        _write_text_no_follow(config_path, config_content, 0o600)
+        _write_text_no_follow(secrets_path, secrets_content, 0o600)
         return config_path, secrets_path
 
 
@@ -598,8 +693,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--allowed-network", action="append", default=[])
-    parser.add_argument("--controller-address", action="append", required=True,
-                        help="repeat for each external USB controller")
+    parser.add_argument("--controller-address", action="append",
+                        help="external USB controller address; repeat to select several "
+                             "(default: all powered USB controllers)")
     parser.add_argument("--allow-code-read", action="store_true")
     parser.add_argument("--allow-jog", action="store_true")
     parser.add_argument("--export-dir")
@@ -615,14 +711,10 @@ def main(argv: list[str] | None = None) -> None:
     token = os.environ.get("GRABER_SETUP_TOKEN")
     if not token or len(token) < 16:
         raise SystemExit("set GRABER_SETUP_TOKEN to at least 16 characters")
-    adapters = [item for item in discover_adapters() if item.is_usb and item.powered is True]
-    wanted = {value.upper() for value in args.controller_address}
-    adapters = [item for item in adapters if item.address in wanted]
-    if {item.address for item in adapters} != wanted:
-        missing = sorted(wanted - {item.address for item in adapters})
-        raise SystemExit(f"configured USB controller(s) unavailable: {missing}")
-    if not adapters:
-        raise SystemExit("no matching powered USB Bluetooth adapters")
+    try:
+        adapters = select_usb_adapters(discover_adapters(), args.controller_address)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     networks = tuple(args.allowed_network or (["127.0.0.0/8", "::1/128"] if args.host in {"127.0.0.1", "::1"} else []))
     if not networks:
         raise SystemExit("at least one --allowed-network is required for a non-loopback bind")

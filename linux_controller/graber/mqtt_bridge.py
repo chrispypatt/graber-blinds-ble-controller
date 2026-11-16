@@ -45,11 +45,12 @@ class CommandController(Protocol):
 
 @dataclass(frozen=True)
 class MqttSettings:
-    topic_prefix: str = "graber-rpi-pilot"
+    topic_prefix: str = "graber-rpi-controller"
     discovery_prefix: str = "homeassistant"
     qos: int = 1
-    device_id: str = "graber_rpi_pilot"
-    device_name: str = "Graber Raspberry Pi Pilot"
+    device_id: str = "graber_rpi_controller"
+    device_name: str = "Graber Raspberry Pi Controller"
+    entity_name_suffix: str = ""
 
 
 @dataclass(frozen=True)
@@ -143,7 +144,7 @@ class MqttBridge:
         return f"{self.settings.topic_prefix}/blind/{blind_id}/diagnostics"
 
     def publish_discovery(self) -> None:
-        """Publish separate, retained, non-optimistic pilot entities."""
+        """Publish retained, non-optimistic Home Assistant entities."""
         device = {
             "identifiers": [self.settings.device_id],
             "name": self.settings.device_name,
@@ -155,7 +156,7 @@ class MqttBridge:
                 suffix = f" {rail.title()}" if blind.tdbu else ""
                 entity_id = _slug(f"{self.settings.device_id}_{blind.blind_id}_{rail}")
                 payload = {
-                    "name": f"{blind.name}{suffix} (Pi Pilot)",
+                    "name": f"{blind.name}{suffix}{self.settings.entity_name_suffix}",
                     "unique_id": entity_id,
                     "device": device,
                     "command_topic": self.command_topic(blind.blind_id, rail),
@@ -219,7 +220,7 @@ class MqttBridge:
             self._publish(
                 f"{self.settings.discovery_prefix}/cover/{entity_id}/config",
                 {
-                    "name": f"{group.name} (Pi Pilot)",
+                    "name": f"{group.name}{self.settings.entity_name_suffix}",
                     "unique_id": entity_id,
                     "device": device,
                     "command_topic": self.group_command_topic(group.group_id),

@@ -37,11 +37,11 @@ Follow `RPI5_SETUP.md`. Validate adapters individually, together, after reboot,
 and after a temporary USB disconnect. Resolve them from controller address plus
 USB identity/path every time; `hciN` is only the current runtime handle.
 
-Perform adapter-specific scans that do not connect or write and collect advertisement
-latency and RSSI for the three verified living-room motors. Do not read access
-codes during routine diagnostics, log them, or publish raw inventory output.
-Verify motor model, single/TDBU type, firmware, address, and existing HA entity
-mapping against the private deployed configuration.
+Perform adapter-specific scans that do not connect or write and collect
+advertisement latency and RSSI for every motor selected for the pilot. Do not
+read access codes during routine diagnostics, log them, or publish raw inventory
+output. Verify motor model, single/TDBU type, firmware, address, and any existing
+HA entity mapping against the private deployed configuration.
 
 The setup wizard may be used here without `--allow-jog` to name devices and
 export draft configuration. Enable its jog gate only in Phase C after entering
@@ -61,11 +61,11 @@ one motor and one operator session:
 4. Confirm the physical remote and official app still work.
 5. Disable the live-test gate when finished.
 
-## Phase D: three-blind living-room pilot
+## Phase D: multi-blind pilot
 
-Configure two blinds on Adapter A and one on Adapter B as an experiment, not a
-capacity claim. Test independent operations, two concurrent sessions, then
-three only if the earlier test is healthy. Best-effort group mode is the
+Assign pilot blinds across the configured adapters as an experiment, not a
+capacity claim. Start with one blind per adapter, then increase concurrent
+sessions only when the earlier test is healthy. Best-effort group mode is the
 default: an unavailable blind reports its own failure while the others proceed.
 Synchronized mode uses a bounded preparation deadline and the configured policy
 for partial preparation; no prepared connection waits indefinitely.
@@ -95,8 +95,9 @@ Do not include access codes or raw private addresses. Generate an offline report
 Compare first-attempt connection success, eventual command success, median/p95
 connection and movement-start latency, retries, timeouts, adapter recovery, and
 group outcome. A GATT-write success rate is reported separately and cannot stand
-in for movement success. The 2–3 second official-app observation is the practical
-reference; the stated 3-second/95%/99% goals remain targets, not claims.
+in for movement success. Establish a comparable official-app observation as the
+deployment-local reference. The stated 3-second/95%/99% goals remain targets,
+not claims.
 
 Keep the metrics file bounded/rotated and use aggregate reports for long-term
 history to protect microSD storage. The example caps the active JSONL file at
@@ -131,8 +132,8 @@ When pilot acceptance is complete:
 
 1. Export or record affected dashboards, entity names, and automation targets.
 2. Stop the Pi service.
-3. Disable legacy automations that issue commands to these three blinds while
-   leaving devices/remotes/app associations intact.
+3. Disable legacy automations that issue commands to the selected pilot blinds
+   while leaving devices/remotes/app associations intact.
 4. Start the Pi service, update automations to pilot entities, and supervise the
    first run.
 5. Preserve old entities disabled/available for rollback until the observation

@@ -72,6 +72,7 @@ class MqttConfig:
     client_id: str = "graber-rpi-controller"
     device_id: str = "graber_rpi_controller"
     device_name: str = "Graber Raspberry Pi Controller"
+    entity_name_suffix: str = ""
     tls: bool = False
     ca_certs: str | None = None
     certfile: str | None = None
