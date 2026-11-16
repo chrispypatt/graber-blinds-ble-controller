@@ -1,0 +1,17 @@
+[Unit]
+Description=Graber BLE controller
+After=network-online.target bluetooth.target
+Wants=network-online.target bluetooth.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/graber-controller/controller.env
+ExecStart=%h/.local/bin/graber-controller
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=25s
+KillSignal=SIGINT
+UMask=0077
+
+[Install]
+WantedBy=default.target
