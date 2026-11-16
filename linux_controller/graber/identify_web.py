@@ -485,6 +485,8 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
         return web.json_response({
             "saved": True,
             "device": session.devices[key].browser_dict(session.allow_code_read),
+            "groups": [{"id": group_id, "name": name}
+                       for group_id, name in session.groups.items()],
         })
 
     async def inspect(request: Any) -> Any:
