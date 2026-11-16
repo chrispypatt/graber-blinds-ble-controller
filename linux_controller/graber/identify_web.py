@@ -231,12 +231,12 @@ class SetupSession:
 
     def export(self) -> tuple[Path, Path]:
         if self.export_dir is None:
-            raise ValueError("export directory was not enabled at launch")
+            raise ValueError("setup saving was not enabled at launch")
         selected = [item for item in self.devices.values() if item.enabled]
         if not selected:
             raise ValueError("no devices have been discovered")
         if any(not item.access_code for item in selected):
-            raise ValueError("every exported device needs an access code or explicitly accepted candidate")
+            raise ValueError("selected shades need access codes before setup can be saved")
         if len({item.id for item in selected}) != len(selected):
             raise ValueError("device ids must be unique")
         self.export_dir.mkdir(parents=True, exist_ok=True)
