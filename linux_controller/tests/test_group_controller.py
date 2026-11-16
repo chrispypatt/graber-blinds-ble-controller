@@ -72,6 +72,31 @@ def test_top_home_assistant_position_is_inverted_at_boundary():
     assert (kind, rail, raw) == (CommandKind.SET_POSITION, Rail.TOP, 20)
 
 
+def test_top_open_close_actions_map_to_opposite_raw_endpoints():
+    assert parse_action("open_top") == (CommandKind.SET_POSITION, Rail.TOP, 0)
+    assert parse_action("close_top") == (CommandKind.SET_POSITION, Rail.TOP, 100)
+    assert parse_action("open_bottom") == (CommandKind.SET_POSITION, Rail.BOTTOM, 100)
+    assert parse_action("close_bottom") == (CommandKind.SET_POSITION, Rail.BOTTOM, 0)
+
+
+def test_snapshot_normalizes_raw_tdbu_boundaries_once():
+    dispatcher = FakeDispatcher("tdbu")
+    dispatcher.blind.config.dual_rail = True
+    controller = Controller({"tdbu": dispatcher}, ())
+
+    dispatcher.blind.state.bottom = 0
+    dispatcher.blind.state.top = 0
+    state = controller.snapshot()["blinds"]["tdbu"]
+    assert state["bottom"] == 0
+    assert state["top"] == 100
+
+    dispatcher.blind.state.bottom = 100
+    dispatcher.blind.state.top = 100
+    state = controller.snapshot()["blinds"]["tdbu"]
+    assert state["bottom"] == 100
+    assert state["top"] == 0
+
+
 def test_status_refresh_is_individual_only():
     async def scenario():
         dispatchers = {"a": FakeDispatcher("a"), "b": FakeDispatcher("b")}

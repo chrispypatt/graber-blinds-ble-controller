@@ -185,6 +185,21 @@ def test_passive_advertisement_updates_positions_without_connecting():
     assert blind._transport.connect_calls == 0
 
 
+def test_tdbu_advertisement_keeps_both_rail_values_in_raw_coordinates():
+    blind = make_controller(FakeConnection(), dual=True)
+    blind.observe_advertisement(DiscoveredDevice(
+        object(), "11:22:33:44:55:66", "RRBZ_TEST", -48,
+        {1: b"\x00\x00\x00\x64"},
+    ))
+    assert (blind.state.bottom, blind.state.top) == (0, 100)
+
+    blind.observe_advertisement(DiscoveredDevice(
+        object(), "11:22:33:44:55:66", "RRBZ_TEST", -48,
+        {1: b"\x00\x00\x64\x00"},
+    ))
+    assert (blind.state.bottom, blind.state.top) == (100, 0)
+
+
 def test_refresh_status_reads_rails_and_battery_without_movement_write():
     async def scenario():
         connection = FakeConnection(reads={

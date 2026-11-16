@@ -85,23 +85,48 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
     bridge = None
     if config.mqtt.enabled:
         import paho.mqtt.client as mqtt
-        from .mqtt_bridge import BlindEntity, MqttBridge, MqttSettings, attach_paho_callbacks
+        from .mqtt_bridge import (
+            BlindEntity,
+            GroupEntity,
+            MqttBridge,
+            MqttSettings,
+            attach_paho_callbacks,
+        )
         mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=config.mqtt.client_id)
         if config.mqtt.username:
             mqtt_client.username_pw_set(config.mqtt.username, config.mqtt.password)
+        if config.mqtt.tls:
+            mqtt_client.tls_set(
+                ca_certs=config.mqtt.ca_certs,
+                certfile=config.mqtt.certfile,
+                keyfile=config.mqtt.keyfile,
+            )
+            mqtt_client.tls_insecure_set(config.mqtt.tls_insecure)
         bridge = MqttBridge(mqtt_client, controller, {
             item.id: BlindEntity(item.id, item.name, item.dual_rail) for item in config.blinds
         }, MqttSettings(
             topic_prefix=config.mqtt.topic_prefix, discovery_prefix=config.mqtt.discovery_prefix,
+            device_id=config.mqtt.device_id, device_name=config.mqtt.device_name,
         ), adapters=tuple(item.id for item in config.adapters),
-            adapter_health_provider=manager.health)
-        attach_paho_callbacks(bridge, mqtt_client, asyncio.get_running_loop())
+            adapter_health_provider=manager.health,
+            groups={
+                item.id: GroupEntity(item.id, item.name, item.members)
+                for item in config.groups
+            })
         from .protocol import Rail, raw_to_ha_position
         def publish_state(blind_id, state) -> None:
+            top_position = (
+                raw_to_ha_position(Rail.TOP, state.top)
+                if state.top is not None else None
+            )
             bridge.publish_observed_state(
                 blind_id,
                 bottom_position=state.bottom,
-                top_position=(raw_to_ha_position(Rail.TOP, state.top) if state.top is not None else None),
+                top_position=top_position,
+                movement=(None if state.bottom is None else
+                          "closed" if state.bottom == 0 else "open"),
+                top_movement=(None if top_position is None else
+                              "closed" if top_position == 0 else "open"),
                 diagnostics={
                     "battery": state.battery,
                     "last_successful_communication": (
@@ -111,6 +136,7 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
                     **controller.diagnostics_for(blind_id),
                 },
             )
+            bridge.publish_blind_availability(blind_id, state.updated_at is not None)
         state_sinks.append(publish_state)
         def publish_result(blind_id, diagnostics) -> None:
             state = dispatchers[blind_id].blind.state
@@ -118,6 +144,18 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
             for adapter_id, health in manager.health().items():
                 bridge.publish_adapter_health(adapter_id, health)
         controller.set_result_listener(publish_result)
+        def republish_current_state() -> None:
+            for blind_id, dispatcher in dispatchers.items():
+                publish_state(blind_id, dispatcher.blind.state)
+        attach_paho_callbacks(
+            bridge,
+            mqtt_client,
+            asyncio.get_running_loop(),
+            error_handler=lambda exc: service_telemetry(
+                "mqtt_callback_failed", {"error": f"{type(exc).__name__}: {exc}"}
+            ),
+            connected_handler=republish_current_state,
+        )
         mqtt_client.will_set(bridge.availability_topic, "offline", qos=1, retain=True)
         mqtt_client.connect_async(config.mqtt.host, config.mqtt.port)
         mqtt_client.loop_start()

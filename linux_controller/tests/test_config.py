@@ -75,3 +75,32 @@ def test_live_web_commands_require_private_token(tmp_path: Path):
     with secrets.open("a") as stream:
         stream.write('\n[web]\ncontrol_token = "long-private-token"\n')
     assert load_config(config, secrets).web.allow_live_commands
+
+
+def test_mqtt_identity_and_tls_are_config_driven(tmp_path: Path):
+    config, secrets = write_config(tmp_path, """
+[mqtt]
+enabled = true
+host = "mqtt.internal"
+port = 8883
+device_id = "house_graber_controller"
+device_name = "House Graber Controller"
+tls = true
+ca_certs = "/etc/ssl/certs/ca-certificates.crt"
+""")
+    result = load_config(config, secrets)
+    assert result.mqtt.device_id == "house_graber_controller"
+    assert result.mqtt.device_name == "House Graber Controller"
+    assert result.mqtt.tls is True
+    assert result.mqtt.ca_certs == "/etc/ssl/certs/ca-certificates.crt"
+
+
+def test_mqtt_client_certificate_requires_key_pair(tmp_path: Path):
+    config, secrets = write_config(tmp_path, """
+[mqtt]
+enabled = true
+host = "mqtt.internal"
+certfile = "/private/client.crt"
+""")
+    with pytest.raises(ConfigError, match="certfile and mqtt.keyfile"):
+        load_config(config, secrets)

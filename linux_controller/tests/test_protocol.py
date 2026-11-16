@@ -81,6 +81,33 @@ def test_top_position_is_inverted_only_at_home_assistant_boundary():
     assert protocol.home_assistant_to_raw(protocol.Rail.TOP, 69) == 31
 
 
+@pytest.mark.parametrize(
+    ("rail", "raw", "ha"),
+    [
+        (protocol.Rail.BOTTOM, 0, 0),
+        (protocol.Rail.BOTTOM, 100, 100),
+        (protocol.Rail.TOP, 0, 100),
+        (protocol.Rail.TOP, 100, 0),
+    ],
+)
+def test_home_assistant_rail_boundaries_round_trip(rail, raw, ha):
+    assert protocol.raw_to_ha_position(rail, raw) == ha
+    assert protocol.ha_to_raw_position(rail, ha) == raw
+
+
+def test_shared_stack_motion_moves_ha_rail_values_in_opposite_numeric_directions():
+    before_bottom_raw, before_top_raw = 26, 71
+    after_bottom_raw, after_top_raw = before_bottom_raw + 5, before_top_raw + 5
+    assert (
+        protocol.raw_to_ha_position(protocol.Rail.BOTTOM, before_bottom_raw),
+        protocol.raw_to_ha_position(protocol.Rail.TOP, before_top_raw),
+    ) == (26, 29)
+    assert (
+        protocol.raw_to_ha_position(protocol.Rail.BOTTOM, after_bottom_raw),
+        protocol.raw_to_ha_position(protocol.Rail.TOP, after_top_raw),
+    ) == (31, 24)
+
+
 def test_manufacturer_payload_uses_known_offsets_and_rejects_invalid_data():
     assert protocol.parse_manufacturer_payload(b"\xaa\xbb\x1f\x47", tdbu=True) == (
         protocol.AdvertisedPosition(bottom=31, top=71)

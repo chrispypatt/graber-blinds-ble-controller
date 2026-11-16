@@ -68,6 +68,13 @@ port = 1883
 topic_prefix = "graber_rpi_test"
 discovery_prefix = "homeassistant"
 client_id = "graber-rpi-controller"
+device_id = "graber_rpi_controller"
+device_name = "Graber Raspberry Pi Controller"
+# For a TLS-enabled broker, set tls = true and provide ca_certs as needed.
+tls = false
+# ca_certs = "/etc/ssl/certs/ca-certificates.crt"
+# certfile and keyfile are optional client-certificate paths.
+# tls_insecure disables hostname verification and should remain false.
 
 [web]
 enabled = true

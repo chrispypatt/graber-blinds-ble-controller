@@ -70,6 +70,13 @@ class MqttConfig:
     topic_prefix: str = "graber_rpi_test"
     discovery_prefix: str = "homeassistant"
     client_id: str = "graber-rpi-controller"
+    device_id: str = "graber_rpi_controller"
+    device_name: str = "Graber Raspberry Pi Controller"
+    tls: bool = False
+    ca_certs: str | None = None
+    certfile: str | None = None
+    keyfile: str | None = field(default=None, repr=False)
+    tls_insecure: bool = False
 
 
 @dataclass(frozen=True)
@@ -213,6 +220,17 @@ def _validate(config: ControllerConfig) -> None:
         not config.web.control_token or config.web.control_token.startswith("REPLACE")
     ):
         raise ConfigError("web live commands require a non-placeholder secrets [web].control_token")
+    if config.mqtt.enabled:
+        if not config.mqtt.host.strip():
+            raise ConfigError("mqtt.host is required when MQTT is enabled")
+        if not 1 <= config.mqtt.port <= 65535:
+            raise ConfigError("mqtt.port must be from 1 through 65535")
+        if not config.mqtt.topic_prefix.strip() or not config.mqtt.discovery_prefix.strip():
+            raise ConfigError("MQTT topic prefixes must not be empty")
+        if not config.mqtt.device_id.strip() or not config.mqtt.device_name.strip():
+            raise ConfigError("MQTT device identity must not be empty")
+        if bool(config.mqtt.certfile) != bool(config.mqtt.keyfile):
+            raise ConfigError("mqtt.certfile and mqtt.keyfile must be configured together")
 
 
 def config_paths_from_env() -> tuple[str, str]:

@@ -187,6 +187,12 @@ deployed private inventory:
 - LAN-only web bind/port and its authentication/control safety settings;
 - timeouts, retry limits, 30-second warm hold, battery policy, metrics path.
 
+MQTT identity and transport are configuration-driven. Set a unique `device_id`
+and stable `device_name` for each controller installation. For a TLS broker,
+enable `mqtt.tls` and configure its CA path; client certificate and key paths
+must be supplied together. Keep MQTT passwords and private-key paths in the
+private secrets file. The controller does not install or configure a broker.
+
 Never put secrets in command-line arguments or the systemd environment file.
 Do not commit either private file. Back them up encrypted or to another trusted
 system. A same-card copy is useful only for accidental edits, not microSD

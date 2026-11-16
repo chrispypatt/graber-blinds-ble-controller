@@ -111,6 +111,22 @@ non-optimistic. Verify top/bottom covers, battery, last communication, command
 status, retry/failure counters, and adapter health without changing the current
 legacy entities.
 
+TDBU rail positions intentionally use Home Assistant cover semantics rather
+than exposing both Graber bytes directly. The bottom rail is unchanged
+(`HA = raw`): 0 is closed/bottom and 100 is open/top. The top rail is inverted
+(`HA = 100 - raw`): Home Assistant Open/100 sends raw 0 and lowers the top rail;
+Close/0 sends raw 100 and raises it. This matches the verified ESP controller.
+Full TDBU open therefore reports bottom 100/top 0, and full close reports
+bottom 0/top 0. The two cover entities describe rail locations; they do not
+promise that two arbitrary absolute targets persist together.
+
+Discovery includes individual rail covers and command-only group covers. Group
+entities accept Open, Close, and Stop but do not publish an invented aggregate
+position. Blind and group command topics are distinct even when their IDs are
+the same. On every broker reconnect the controller republishes its currently
+observed positions, diagnostics, and per-blind availability. Retained movement
+commands are always ignored.
+
 When pilot acceptance is complete:
 
 1. Export or record affected dashboards, entity names, and automation targets.
