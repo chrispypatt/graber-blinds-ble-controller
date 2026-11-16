@@ -17,6 +17,9 @@ function draftKey(id,action){return`${id}:${action}`}
 function draftValue(id,action,fallback){const key=draftKey(id,action);return sliderDrafts.has(key)?sliderDrafts.get(key):fallback}
 function pendingKey(targetType,id,action){return`${targetType}:${id}:${action}`}
 function targetPending(targetType,id){return[...pending].some(key=>key.startsWith(`${targetType}:${id}:`))}
+function movementPending(targetType,id){
+  return[...pending].some(key=>key.startsWith(`${targetType}:${id}:`)&&!key.endsWith(':stop'));
+}
 async function getState(){const response=await fetch('/api/state');if(!response.ok)throw new Error('Controller unavailable');return response.json()}
 
 async function command(id,action,position=null,targetType='blind'){
@@ -24,7 +27,10 @@ async function command(id,action,position=null,targetType='blind'){
   if(state._web.token_required&&!token){openAuth();toast('Enter the control token first.','error');return}
   const activeKey=pendingKey(targetType,id,action);
   const targetKey=`${targetType}:${id}`;
-  if(action==='stop')activeRequests.get(targetKey)?.abort();
+  if(action==='stop'){
+    activeRequests.get(targetKey)?.abort();
+    for(const key of [...pending])if(key.startsWith(`${targetKey}:`))pending.delete(key);
+  }
   const requestController=new AbortController();
   activeRequests.set(targetKey,requestController);
   pending.add(activeKey);render();
@@ -47,7 +53,7 @@ async function command(id,action,position=null,targetType='blind'){
 }
 
 function button(label,action,id,kind='secondary',targetType='blind'){
-  const blocked=action==='stop'?pending.has(pendingKey(targetType,id,action)):targetPending(targetType,id);
+  const blocked=action==='stop'?pending.has(pendingKey(targetType,id,action)):movementPending(targetType,id);
   return`<button class="button ${kind}" data-command="${esc(action)}" data-target="${esc(id)}" data-target-type="${esc(targetType)}" ${blocked||!state._web.live_controls?'disabled':''}>${esc(label)}</button>`;
 }
 function bindCommands(root=document){root.querySelectorAll('[data-command]').forEach(node=>node.addEventListener('click',()=>command(node.dataset.target,node.dataset.command,node.dataset.position==null?null:Number(node.dataset.position),node.dataset.targetType))) }
@@ -63,7 +69,7 @@ function groupCard(id,item){
 function slider(id,label,action,value,startLabel,endLabel){
   const safe=draftValue(id,action,value??50);
   const unknown=value==null&&!sliderDrafts.has(draftKey(id,action));
-  return`<div class="slider-row" data-position-control="${esc(action)}"><label><span>${esc(label)}</span><output>${esc(unknown?'Unknown':`${safe}%`)}</output></label><input type="range" min="0" max="100" value="${safe}" data-slider data-action="${esc(action)}" aria-label="${esc(label)}"><div class="range-labels"><span>${esc(startLabel)}</span><span>${esc(endLabel)}</span></div><div class="slider-actions"><button class="button secondary compact" data-command="${esc(action)}" data-target="${esc(id)}" data-target-type="blind" data-position="${safe}" ${targetPending('blind',id)||!state._web.live_controls?'disabled':''}>Set</button></div></div>`;
+  return`<div class="slider-row" data-position-control="${esc(action)}"><label><span>${esc(label)}</span><output>${esc(unknown?'Unknown':`${safe}%`)}</output></label><input type="range" min="0" max="100" value="${safe}" data-slider data-action="${esc(action)}" aria-label="${esc(label)}"><div class="range-labels"><span>${esc(startLabel)}</span><span>${esc(endLabel)}</span></div><div class="slider-actions"><button class="button secondary compact" data-command="${esc(action)}" data-target="${esc(id)}" data-target-type="blind" data-position="${safe}" ${movementPending('blind',id)||!state._web.live_controls?'disabled':''}>Set</button></div></div>`;
 }
 
 function applyVisual(card,id,item){

@@ -4,7 +4,7 @@ from pathlib import Path
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from graber.portal import ModeSupervisor, create_app
+from graber.portal import ModeSupervisor, create_app, is_command_request
 
 
 class RecordingSupervisor(ModeSupervisor):
@@ -39,6 +39,13 @@ def test_invalid_saved_mode_falls_back_to_setup(tmp_path):
     supervisor = RecordingSupervisor(tmp_path)
     supervisor.mode_file.write_text("unexpected\n")
     assert supervisor.saved_mode() == "setup"
+
+
+def test_portal_tracks_explicit_blind_and_group_command_routes():
+    assert is_command_request("POST", "/api/blinds/shared/commands")
+    assert is_command_request("POST", "/api/groups/shared/commands")
+    assert not is_command_request("POST", "/api/targets/shared/commands")
+    assert not is_command_request("GET", "/api/blinds/shared/commands")
 
 
 def test_edit_setup_requires_token_and_waits_for_commands(tmp_path):

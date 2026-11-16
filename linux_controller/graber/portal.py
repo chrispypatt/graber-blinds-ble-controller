@@ -22,6 +22,14 @@ HOP_BY_HOP = {
 }
 
 
+def is_command_request(method: str, path: str) -> bool:
+    return (
+        method == "POST"
+        and path.endswith("/commands")
+        and (path.startswith("/api/blinds/") or path.startswith("/api/groups/"))
+    )
+
+
 class ModeSupervisor:
     def __init__(self, *, setup_runner: Path, setup_settings: Path,
                  config_path: Path, secrets_path: Path, token_file: Path,
@@ -193,7 +201,7 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...])
 
     async def proxy(request: web.Request) -> web.Response:
         await supervisor.ensure_running()
-        command_request = request.method == "POST" and request.path.startswith("/api/targets/")
+        command_request = is_command_request(request.method, request.path)
         if command_request:
             supervisor.active_commands += 1
         try:
