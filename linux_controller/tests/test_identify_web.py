@@ -36,25 +36,23 @@ def test_setup_configuration_never_returns_access_code_to_browser(tmp_path: Path
     assert "firmware" not in browser
     assert "battery" not in browser
     assert "motor_type_candidate" not in browser
-    assert session.state(allow_jog=False)["groups"] == [
+    assert session.state(allow_jog=False)["groups"][:2] == [
         {"id": "living_room", "name": "Living Room"},
         {"id": "dining", "name": "Dining"},
     ]
 
 
-def test_name_generates_id_and_group_must_come_from_catalog(tmp_path: Path):
+def test_name_generates_id_and_groups_allow_multiple_custom_values(tmp_path: Path):
     session, key = make_session(tmp_path)
-    session.configure(key, {"name": "Living East", "id": "client_override", "group": "dining"})
+    session.configure(key, {
+        "name": "Living East", "id": "client_override",
+        "groups": ["Dining", "Whole House", "Window Wall"],
+    })
     device = session.devices[key]
     assert device.id == "living_east"
-    assert device.group == "dining"
+    assert device.groups == ("dining", "whole_house", "window_wall")
+    assert session.groups["window_wall"] == "Window Wall"
     assert device.configured is True
-    try:
-        session.configure(key, {"group": "invented_group"})
-    except ValueError as exc:
-        assert "unknown group" in str(exc)
-    else:
-        raise AssertionError("unknown group should be rejected")
 
 
 def test_generated_id_collision_is_rejected_on_save(tmp_path: Path):
@@ -62,7 +60,7 @@ def test_generated_id_collision_is_rejected_on_save(tmp_path: Path):
     second = MotorObservation("RRBZ_OTHER", "11:22:33:44:55:77", [-60], 20, 80)
     second_key = opaque_id(second.address)
     session.devices[second_key] = DeviceSetup(
-        second, "other", "Other", False, "usb_1_2_3", group=""
+        second, "other", "Other", False, "usb_1_2_3", groups=()
     )
     try:
         session.configure(second_key, {"name": "Living Left"})
@@ -125,6 +123,32 @@ def test_scan_suggests_tdbu_only_for_nonzero_top_position(tmp_path: Path):
     devices = {item.observation.name: item for item in session.devices.values()}
     assert devices["RRBZ_TDBU"].dual_rail is True
     assert devices["RRBZ_AMBIGUOUS"].dual_rail is False
+
+
+def test_scan_can_be_cancelled_and_cleaned_up(tmp_path: Path):
+    session, _ = make_session(tmp_path)
+    started = asyncio.Event()
+
+    async def fake_scan_all(_seconds):
+        started.set()
+        await asyncio.Event().wait()
+
+    session.scan_all = fake_scan_all
+
+    async def scenario():
+        operation = asyncio.create_task(session.start_scan(30))
+        await started.wait()
+        assert await session.cancel_scan() is True
+        try:
+            await operation
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("cancelled scan should propagate cancellation")
+        assert session.scan_task is None
+        assert await session.cancel_scan() is False
+
+    asyncio.run(scenario())
 
 
 def test_known_credentials_reject_insecure_permissions(tmp_path: Path):
@@ -191,7 +215,9 @@ def test_candidate_code_requires_explicit_selection(tmp_path: Path):
 
 def test_export_writes_valid_split_config_and_mode_0600_secrets(tmp_path: Path):
     session, key = make_session(tmp_path)
-    session.configure(key, {"access_code": "0123456", "group": "living_room"})
+    session.configure(key, {
+        "access_code": "0123456", "groups": ["Living Room", "Whole House"],
+    })
     config_path, secrets_path = session.export()
     assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600
     loaded = load_config(config_path, secrets_path)
@@ -199,11 +225,13 @@ def test_export_writes_valid_split_config_and_mode_0600_secrets(tmp_path: Path):
     assert loaded.blinds[0].access_code == "0123456"
     assert loaded.groups[0].id == "living_room"
     assert loaded.groups[0].name == "Living Room"
+    assert loaded.groups[1].id == "whole_house"
+    assert loaded.groups[1].members == ("living_left",)
 
 
 def test_export_omits_group_for_no_group_selection(tmp_path: Path):
     session, key = make_session(tmp_path)
-    session.configure(key, {"access_code": "0123456", "name": "Solo", "group": ""})
+    session.configure(key, {"access_code": "0123456", "name": "Solo", "groups": []})
     config_path, secrets_path = session.export()
     loaded = load_config(config_path, secrets_path)
     assert loaded.blinds[0].id == "solo"

@@ -24,6 +24,14 @@ from .identify_cli import MotorObservation, inspect_motor, scan
 from .protocol import CommandKind, Rail, raw_to_ha_position
 
 
+COMMON_GROUP_NAMES = (
+    "Living Room", "Family Room", "Great Room", "Dining Room", "Kitchen",
+    "Primary Bedroom", "Bedroom", "Guest Bedroom", "Nursery", "Office", "Den",
+    "Media Room", "Game Room", "Sunroom", "Basement", "Upstairs", "Downstairs",
+    "Front of House", "Back of House", "All Bedrooms", "All Common Areas", "Whole House",
+)
+
+
 def slug(value: str) -> str:
     result = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
     return result or "blind"
@@ -87,7 +95,7 @@ class DeviceSetup:
     friendly_name: str
     dual_rail: bool
     preferred_adapter: str
-    group: str = ""
+    groups: tuple[str, ...] = ()
     enabled: bool = True
     configured: bool = False
     access_code: str | None = field(default=None, repr=False)
@@ -108,7 +116,7 @@ class DeviceSetup:
             "name": self.friendly_name,
             "dual_rail": self.dual_rail,
             "preferred_adapter": self.preferred_adapter,
-            "group": self.group,
+            "groups": list(self.groups),
             "enabled": self.enabled,
             "configured": self.configured,
             "bottom_raw": self.observation.bottom_raw,
@@ -131,16 +139,17 @@ class SetupSession:
         self.export_dir = Path(export_dir).resolve() if export_dir else None
         self.known_credentials = dict(known_credentials or {})
         self.groups: dict[str, str] = {}
-        for name in group_names:
+        for name in (*group_names, *COMMON_GROUP_NAMES):
             friendly = name.strip()
             if not friendly:
                 continue
             group_id = slug(friendly)
             if group_id in self.groups:
-                raise ValueError(f"duplicate group id generated from {friendly!r}")
+                continue
             self.groups[group_id] = friendly
         self.devices: dict[str, DeviceSetup] = {}
         self.ble_lock = asyncio.Lock()
+        self.scan_task: asyncio.Task[None] | None = None
 
     async def scan_all(self, seconds: float = 12) -> None:
         async with self.ble_lock:
@@ -159,10 +168,28 @@ class SetupSession:
                     self.devices[key] = DeviceSetup(
                         motor, default_id, motor.name,
                         motor.motor_type_candidate == "tdbu_candidate", adapter_id,
-                        group="",
                         configured=False,
                         access_code=self.known_credentials.get(motor.address.upper()),
                     )
+
+    async def start_scan(self, seconds: float) -> None:
+        if self.scan_task and not self.scan_task.done():
+            raise ValueError("a scan is already running")
+        task = asyncio.create_task(self.scan_all(seconds))
+        self.scan_task = task
+        try:
+            await task
+        finally:
+            if self.scan_task is task:
+                self.scan_task = None
+
+    async def cancel_scan(self) -> bool:
+        task = self.scan_task
+        if task is None or task.done():
+            return False
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
 
     def state(self, *, allow_jog: bool) -> dict[str, Any]:
         return {
@@ -197,10 +224,27 @@ class SetupSession:
         if requested not in valid:
             raise ValueError("unknown adapter assignment")
         device.preferred_adapter = requested
-        requested_group = str(body.get("group", device.group))
-        if requested_group and requested_group not in self.groups:
-            raise ValueError("unknown group selection")
-        device.group = requested_group
+        requested_groups = body.get("groups")
+        if requested_groups is None and "group" in body:
+            legacy_group = str(body.get("group", "")).strip()
+            requested_groups = [legacy_group] if legacy_group else []
+        if requested_groups is None:
+            requested_groups = [self.groups.get(group_id, group_id) for group_id in device.groups]
+        if not isinstance(requested_groups, list) or len(requested_groups) > 20:
+            raise ValueError("groups must be a list of at most 20 names")
+        normalized_groups: list[str] = []
+        for value in requested_groups:
+            friendly = " ".join(str(value).split())
+            if not friendly:
+                continue
+            if len(friendly) > 60 or not re.search(r"[A-Za-z0-9]", friendly):
+                raise ValueError("group names must contain a letter or number and be at most 60 characters")
+            group_id = slug(friendly)
+            if group_id not in self.groups:
+                self.groups[group_id] = friendly
+            if group_id not in normalized_groups:
+                normalized_groups.append(group_id)
+        device.groups = tuple(normalized_groups)
         device.enabled = bool(body.get("enabled", device.enabled))
         device.configured = True
         code = str(body.get("access_code", ""))
@@ -264,8 +308,8 @@ class SetupSession:
             ])
         groups: dict[str, list[str]] = {}
         for item in selected:
-            if item.group:
-                groups.setdefault(item.group, []).append(item.id)
+            for group in item.groups:
+                groups.setdefault(group, []).append(item.id)
         for group, members in groups.items():
             lines.extend([
                 "[[groups]]", f'id = {json.dumps(group)}',
@@ -386,8 +430,18 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
     async def start_scan(request: Any) -> Any:
         authorize(request)
         body = await request.json()
-        await session.scan_all(float(body.get("seconds", 12)))
-        return web.json_response(session.state(allow_jog=settings.allow_jog))
+        cancelled = False
+        try:
+            await session.start_scan(float(body.get("seconds", 12)))
+        except asyncio.CancelledError:
+            cancelled = True
+        payload = session.state(allow_jog=settings.allow_jog)
+        payload["cancelled"] = cancelled
+        return web.json_response(payload)
+
+    async def cancel_scan(request: Any) -> Any:
+        authorize(request)
+        return web.json_response({"cancelled": await session.cancel_scan()})
 
     async def configure(request: Any) -> Any:
         authorize(request)
@@ -434,6 +488,7 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
     app.router.add_get("/assets/setup.js", js)
     app.router.add_get("/api/state", state)
     app.router.add_post("/api/scan", start_scan)
+    app.router.add_post("/api/scan/cancel", cancel_scan)
     app.router.add_post("/api/devices/{key}/configure", configure)
     app.router.add_post("/api/devices/{key}/inspect", inspect)
     app.router.add_post("/api/devices/{key}/jog", jog)
@@ -473,7 +528,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("at least one --allowed-network is required for a non-loopback bind")
     settings = SetupWebSettings(args.host, args.port, networks, args.allow_jog, token)
     known_credentials = load_known_credentials(args.known_secrets) if args.known_secrets else {}
-    group_names = tuple(args.group_name or ("Living", "Dining"))
+    group_names = tuple(args.group_name or ())
     web.run_app(create_app(SetupSession(adapters, allow_code_read=args.allow_code_read,
                                         export_dir=args.export_dir,
                                         known_credentials=known_credentials,

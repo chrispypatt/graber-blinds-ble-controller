@@ -133,9 +133,8 @@ wizard must not SSH to Home Assistant or depend on HA being available at run
 time. Unknown devices remain credential-missing and cannot be exported until a
 verified code is supplied.
 
-The interim setup UI offers the current household groups `Living` and `Dining`
-without requiring a prior private configuration. Set the optional
-`GRABER_SETUP_GROUP_NAMES` comma-separated value to override those choices.
+The setup UI includes common room and whole-home group suggestions and accepts
+custom group names. Set `GRABER_SETUP_GROUP_NAMES` to add local suggestions.
 The browser shows friendly names; export derives lowercase underscore IDs.
 
 Open `http://PI_ADDRESS:8090`, enter the token, scan, inspect, name, and assign
