@@ -6,7 +6,7 @@ Wants=network-online.target bluetooth.target
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/graber-controller/controller.env
-ExecStart=%h/.local/bin/graber-controller
+ExecStart=%h/.local/bin/graber-portal
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=25s

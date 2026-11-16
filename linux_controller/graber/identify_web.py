@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable
 from .adapter_manager import AdapterManager, ResolvedAdapter
 from .ble_transport import BleakTransport
 from .blind import BlindCommand, BlindController, Outcome
-from .config import AdapterConfig, BlindConfig, RetryConfig
+from .config import AdapterConfig, BlindConfig, RetryConfig, load_config
 from .diagnostics import AdapterIdentity, discover_adapters
 from .identify_cli import MotorObservation, inspect_motor, scan
 from .protocol import CommandKind, Rail, raw_to_ha_position
@@ -130,16 +130,59 @@ class DeviceSetup:
         }
 
 
+@dataclass(frozen=True)
+class SavedDeviceSetup:
+    id: str
+    friendly_name: str
+    dual_rail: bool
+    preferred_adapter: str | None
+    groups: tuple[str, ...]
+    access_code: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class SavedSetup:
+    devices: dict[str, SavedDeviceSetup]
+    groups: dict[str, str]
+
+
+def load_saved_setup(config_path: str | Path, secrets_path: str | Path) -> SavedSetup:
+    """Load a previously exported setup without exposing credentials to the UI."""
+
+    config = load_config(config_path, secrets_path)
+    memberships: dict[str, list[str]] = {blind.id: [] for blind in config.blinds}
+    groups = {group.id: group.name for group in config.groups}
+    for group in config.groups:
+        for blind_id in group.members:
+            memberships[blind_id].append(group.id)
+    devices = {
+        blind.address.upper(): SavedDeviceSetup(
+            id=blind.id,
+            friendly_name=blind.name,
+            dual_rail=blind.dual_rail,
+            preferred_adapter=blind.preferred_adapter,
+            groups=tuple(memberships[blind.id]),
+            access_code=blind.access_code,
+        )
+        for blind in config.blinds
+    }
+    return SavedSetup(devices=devices, groups=groups)
+
+
 class SetupSession:
     def __init__(self, adapters: list[AdapterIdentity], *, allow_code_read: bool = False,
                  export_dir: str | Path | None = None,
                  known_credentials: dict[str, str] | None = None,
-                 group_names: tuple[str, ...] = ()):
+                 group_names: tuple[str, ...] = (),
+                 saved_setup: SavedSetup | None = None):
         self.adapters = {item.address or item.hci_name: item for item in adapters}
         self.allow_code_read = allow_code_read
         self.export_dir = Path(export_dir).resolve() if export_dir else None
         self.known_credentials = dict(known_credentials or {})
+        self.saved_setup = saved_setup or SavedSetup({}, {})
         self.groups: dict[str, str] = {}
+        for group_id, name in self.saved_setup.groups.items():
+            self.groups[group_id] = name
         for name in (*group_names, *COMMON_GROUP_NAMES):
             friendly = name.strip()
             if not friendly:
@@ -168,11 +211,26 @@ class SetupSession:
                             existing.access_code = self.known_credentials.get(motor.address.upper())
                         continue
                     default_id = slug(motor.name)
+                    saved = self.saved_setup.devices.get(motor.address.upper())
+                    valid_adapters = {
+                        slug(f"usb_{item.usb_path or item.address or item.hci_name}")
+                        for item in self.adapters.values()
+                    }
+                    preferred_adapter = (
+                        saved.preferred_adapter
+                        if saved and saved.preferred_adapter in valid_adapters
+                        else adapter_id
+                    )
                     self.devices[key] = DeviceSetup(
-                        motor, default_id, motor.name,
-                        motor.motor_type_candidate == "tdbu_candidate", adapter_id,
-                        configured=False,
-                        access_code=self.known_credentials.get(motor.address.upper()),
+                        motor,
+                        saved.id if saved else default_id,
+                        saved.friendly_name if saved else motor.name,
+                        saved.dual_rail if saved else motor.motor_type_candidate == "tdbu_candidate",
+                        preferred_adapter,
+                        groups=saved.groups if saved else (),
+                        configured=saved is not None,
+                        access_code=(saved.access_code if saved else
+                                     self.known_credentials.get(motor.address.upper())),
                     )
 
     async def start_scan(self, seconds: float) -> None:
@@ -547,6 +605,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--export-dir")
     parser.add_argument("--known-secrets",
                         help="mode-0600 controller secrets TOML used to prefill codes by address")
+    parser.add_argument("--existing-config",
+                        help="existing exported controller config to restore after scanning")
+    parser.add_argument("--existing-secrets",
+                        help="existing exported mode-0600 secrets paired with --existing-config")
     parser.add_argument("--group-name", action="append", default=[],
                         help="friendly group choice; repeat for each configured group")
     args = parser.parse_args(argv)
@@ -566,11 +628,18 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("at least one --allowed-network is required for a non-loopback bind")
     settings = SetupWebSettings(args.host, args.port, networks, args.allow_jog, token)
     known_credentials = load_known_credentials(args.known_secrets) if args.known_secrets else {}
+    if bool(args.existing_config) != bool(args.existing_secrets):
+        raise SystemExit("--existing-config and --existing-secrets must be provided together")
+    saved_setup = (
+        load_saved_setup(args.existing_config, args.existing_secrets)
+        if args.existing_config else None
+    )
     group_names = tuple(args.group_name or ())
     web.run_app(create_app(SetupSession(adapters, allow_code_read=args.allow_code_read,
                                         export_dir=args.export_dir,
                                         known_credentials=known_credentials,
-                                        group_names=group_names), settings),
+                                        group_names=group_names,
+                                        saved_setup=saved_setup), settings),
                 host=args.host, port=args.port, access_log=None)
 
 

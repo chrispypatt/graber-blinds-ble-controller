@@ -5,7 +5,13 @@ from pathlib import Path
 from graber.config import load_config
 from graber.diagnostics import AdapterIdentity
 from graber.identify_cli import MotorObservation
-from graber.identify_web import DeviceSetup, SetupSession, load_known_credentials, opaque_id
+from graber.identify_web import (
+    DeviceSetup,
+    SetupSession,
+    load_known_credentials,
+    load_saved_setup,
+    opaque_id,
+)
 from graber.identify_web import SetupWebSettings, create_app
 
 
@@ -123,6 +129,43 @@ def test_scan_suggests_tdbu_only_for_nonzero_top_position(tmp_path: Path):
     devices = {item.observation.name: item for item in session.devices.values()}
     assert devices["RRBZ_TDBU"].dual_rail is True
     assert devices["RRBZ_AMBIGUOUS"].dual_rail is False
+
+
+def test_scan_restores_saved_names_groups_type_adapter_and_code(tmp_path: Path):
+    original, key = make_session(tmp_path)
+    original.configure(key, {
+        "access_code": "0123456",
+        "name": "Living Left",
+        "groups": ["Main Floor", "Whole House"],
+        "dual_rail": True,
+        "preferred_adapter": "usb_1_2_3",
+    })
+    config_path, secrets_path = original.export()
+    saved = load_saved_setup(config_path, secrets_path)
+    adapter = next(iter(original.adapters.values()))
+    restored = SetupSession([adapter], export_dir=tmp_path, saved_setup=saved)
+
+    async def fake_scan(_adapter, _seconds):
+        return [MotorObservation("RRBZ_TEST", "11:22:33:44:55:66", [-55], 10, 0)]
+
+    import graber.identify_web as identify_web
+    old_scan = identify_web.scan
+    identify_web.scan = fake_scan
+    try:
+        asyncio.run(restored.scan_all())
+    finally:
+        identify_web.scan = old_scan
+
+    device = restored.devices[key]
+    assert device.friendly_name == "Living Left"
+    assert device.id == "living_left"
+    assert device.dual_rail is True
+    assert device.preferred_adapter == "usb_1_2_3"
+    assert device.groups == ("main_floor", "whole_house")
+    assert device.configured is True
+    assert device.access_code == "0123456"
+    assert restored.groups["main_floor"] == "Main Floor"
+    assert restored.groups["whole_house"] == "Whole House"
 
 
 def test_scan_can_be_cancelled_and_cleaned_up(tmp_path: Path):

@@ -2,6 +2,12 @@
 # Start the temporary identification UI from a private host-specific settings file.
 set -eu
 
+# A local supervisor may bind the child to loopback regardless of the saved
+# standalone wizard settings.
+bind_host=${GRABER_SETUP_BIND_HOST:-}
+bind_port=${GRABER_SETUP_BIND_PORT:-}
+bind_allowed_networks=${GRABER_SETUP_BIND_ALLOWED_NETWORKS:-}
+
 settings=${1:-}
 if [ -z "$settings" ] || [ ! -f "$settings" ]; then
   echo "usage: deploy/run-setup-wizard.sh /path/to/private-settings.env" >&2
@@ -33,8 +39,9 @@ GRABER_SETUP_TOKEN=$(cat "$GRABER_SETUP_TOKEN_FILE")
 export GRABER_SETUP_TOKEN
 
 python=${GRABER_SETUP_PYTHON:-$GRABER_SETUP_SOURCE_DIR/.venv/bin/python}
-host=${GRABER_SETUP_HOST:-127.0.0.1}
-port=${GRABER_SETUP_PORT:-8090}
+host=${bind_host:-${GRABER_SETUP_HOST:-127.0.0.1}}
+port=${bind_port:-${GRABER_SETUP_PORT:-8090}}
+allowed_networks=${bind_allowed_networks:-$GRABER_SETUP_ALLOWED_NETWORKS}
 export PYTHONPATH=${GRABER_SETUP_PYTHONPATH:-$GRABER_SETUP_SOURCE_DIR/linux_controller}
 
 set -- "$python" -m graber.identify_web \
@@ -43,10 +50,16 @@ set -- "$python" -m graber.identify_web \
 if [ -n "${GRABER_SETUP_KNOWN_SECRETS:-}" ]; then
   set -- "$@" --known-secrets "$GRABER_SETUP_KNOWN_SECRETS"
 fi
+if [ -n "${GRABER_SETUP_EXISTING_CONFIG:-}" ] || [ -n "${GRABER_SETUP_EXISTING_SECRETS:-}" ]; then
+  : "${GRABER_SETUP_EXISTING_CONFIG:?missing GRABER_SETUP_EXISTING_CONFIG}"
+  : "${GRABER_SETUP_EXISTING_SECRETS:?missing GRABER_SETUP_EXISTING_SECRETS}"
+  set -- "$@" --existing-config "$GRABER_SETUP_EXISTING_CONFIG" \
+    --existing-secrets "$GRABER_SETUP_EXISTING_SECRETS"
+fi
 
 old_ifs=$IFS
 IFS=,
-for network in $GRABER_SETUP_ALLOWED_NETWORKS; do
+for network in $allowed_networks; do
   set -- "$@" --allowed-network "$network"
 done
 for address in $GRABER_SETUP_CONTROLLER_ADDRESSES; do

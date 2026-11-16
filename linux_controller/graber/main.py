@@ -25,7 +25,7 @@ def telemetry(event: str, fields: dict[str, object]) -> None:
     LOG.info("%s %s", event, json.dumps(fields, sort_keys=True, default=str))
 
 
-async def run_service(config_path: str, secrets_path: str) -> None:
+async def run_service(config_path: str, secrets_path: str, *, web_override=None) -> None:
     # Import deployment-only modules lazily so offline protocol tests stay light.
     from .diagnostics import JsonlMetricsWriter, resolve_configured_adapters
 
@@ -99,13 +99,16 @@ async def run_service(config_path: str, secrets_path: str) -> None:
             mqtt_client.disconnect()
             mqtt_client.loop_stop()
         cleanup.append(close_mqtt)
-    if config.web.enabled:
+    if config.web.enabled or web_override is not None:
         from .web import WebSettings, start_web
-        allowed_networks = config.web.allowed_networks or WebSettings().allowed_networks
-        web_runner = await start_web(controller, WebSettings(
-            host=config.web.host, port=config.web.port, live_controls=config.web.allow_live_commands,
-            allowed_networks=allowed_networks, control_token=config.web.control_token,
-        ))
+        if web_override is None:
+            allowed_networks = config.web.allowed_networks or WebSettings().allowed_networks
+            web_override = WebSettings(
+                host=config.web.host, port=config.web.port,
+                live_controls=config.web.allow_live_commands,
+                allowed_networks=allowed_networks, control_token=config.web.control_token,
+            )
+        web_runner = await start_web(controller, web_override)
         cleanup.append(web_runner.cleanup)
     async def refresh_adapter_health() -> None:
         while True:
@@ -135,6 +138,10 @@ def main() -> None:
     parser.add_argument("--check-config", action="store_true",
                         help="validate local files only; do not inspect Bluetooth or start services")
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--portal-host")
+    parser.add_argument("--portal-port", type=int)
+    parser.add_argument("--portal-allowed-network", action="append", default=[])
+    parser.add_argument("--portal-control-token-file")
     args = parser.parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper()),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -142,7 +149,23 @@ def main() -> None:
         config = load_config(args.config, args.secrets)
         print(f"configuration valid: {len(config.blinds)} blind(s), {len(config.adapters)} adapter(s)")
         return
-    asyncio.run(run_service(args.config, args.secrets))
+    web_override = None
+    if args.portal_host or args.portal_port or args.portal_control_token_file:
+        if not (args.portal_host and args.portal_port and args.portal_control_token_file):
+            parser.error("portal web override requires host, port, and control token file")
+        from pathlib import Path
+        from .web import WebSettings
+        token = Path(args.portal_control_token_file).read_text(encoding="utf-8").strip()
+        if not token:
+            parser.error("portal control token file is empty")
+        web_override = WebSettings(
+            host=args.portal_host,
+            port=args.portal_port,
+            live_controls=True,
+            allowed_networks=tuple(args.portal_allowed_network or ("127.0.0.0/8", "::1/128")),
+            control_token=token,
+        )
+    asyncio.run(run_service(args.config, args.secrets, web_override=web_override))
 
 
 if __name__ == "__main__":
