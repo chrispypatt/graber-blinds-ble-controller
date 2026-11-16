@@ -46,10 +46,13 @@ class AdapterRuntime:
     stats: AdapterStats = field(default_factory=AdapterStats)
     connection_slots: asyncio.Semaphore = field(init=False)
     cold_slots: asyncio.Semaphore = field(init=False)
+    cold_start_lock: asyncio.Lock = field(init=False)
+    last_cold_start: float | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.connection_slots = asyncio.Semaphore(self.config.max_connections)
         self.cold_slots = asyncio.Semaphore(self.config.max_cold_connections)
+        self.cold_start_lock = asyncio.Lock()
 
 
 Resolver = Callable[[tuple[AdapterConfig, ...]], Awaitable[list[ResolvedAdapter]]]
@@ -156,8 +159,22 @@ class AdapterManager:
     async def cold_connection(self, runtime: AdapterRuntime) -> AsyncIterator[float]:
         queued_at = time.monotonic()
         await runtime.cold_slots.acquire()
-        queue_wait_ms = (time.monotonic() - queued_at) * 1000
         try:
+            # Only admission to a new cold attempt is spaced. Once admitted,
+            # attempts may overlap up to max_cold_connections. This avoids a
+            # burst of same-instant BlueZ operations without serializing the
+            # full connection lifecycle.
+            async with runtime.cold_start_lock:
+                if runtime.last_cold_start is not None:
+                    delay = (
+                        runtime.last_cold_start
+                        + runtime.config.cold_start_spacing_s
+                        - time.monotonic()
+                    )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                runtime.last_cold_start = time.monotonic()
+            queue_wait_ms = (time.monotonic() - queued_at) * 1000
             # Re-check after waiting in the per-adapter queue. A health refresh
             # may have observed a USB disconnect while this work was queued.
             if runtime.resolved is None:

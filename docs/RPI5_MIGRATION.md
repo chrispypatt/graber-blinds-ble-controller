@@ -77,8 +77,12 @@ default: an unavailable blind reports its own failure while the others proceed.
 Keep `max_cold_connections = 1` for the first baseline, then test `2` before
 considering higher values. Compare first-attempt success, movement-start spread,
 and `cold_queue_ms`; a slow connection must not indefinitely hold unrelated
-shades behind the adapter queue. Do not increase the 30-second warm timeout to
-hide cold-start latency.
+shades behind the adapter queue. If exact-simultaneous starts cause BlueZ
+timeouts, keep the concurrency at `2` and test a small per-adapter
+`cold_start_spacing_s` before abandoning overlap. This spacing delays admission
+to the second attempt but does not serialize the connections after they start.
+Do not increase the 30-second warm timeout to hide cold-start latency.
+
 Synchronized mode uses a bounded preparation deadline and the configured policy
 for partial preparation; no prepared connection waits indefinitely.
 

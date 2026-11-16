@@ -24,6 +24,7 @@ controller_address = "AA:BB:CC:DD:EE:01"
 usb_path = "1-1.2"
 max_connections = 5
 max_cold_connections = 1
+cold_start_spacing_s = 0
 
 [[adapters]]
 id = "external_b"
@@ -31,6 +32,7 @@ controller_address = "AA:BB:CC:DD:EE:02"
 usb_path = "1-1.3"
 max_connections = 5
 max_cold_connections = 1
+cold_start_spacing_s = 0
 
 # Illustrative shades only. Replace these blocks with the verified private
 # inventory, adding or removing shades and groups as needed.

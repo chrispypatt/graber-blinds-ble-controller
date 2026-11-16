@@ -98,6 +98,129 @@ def test_cold_connection_reports_immediate_and_queued_wait():
     run(scenario())
 
 
+def test_cold_start_spacing_overlaps_attempts_after_stagger():
+    config = AdapterConfig(
+        "a", "AA:00:00:00:00:01", max_cold_connections=2,
+        cold_start_spacing_s=0.03,
+    )
+
+    async def resolver(_):
+        return [ResolvedAdapter("a", config.controller_address, "hci7")]
+
+    manager = AdapterManager((config,), resolver)
+
+    async def scenario():
+        runtime = (await manager.candidates(
+            BlindConfig("x", "X", "11", False, "1234567")
+        ))[0]
+        release = asyncio.Event()
+        both_active = asyncio.Event()
+        starts = []
+        active = 0
+        maximum_active = 0
+
+        async def worker():
+            nonlocal active, maximum_active
+            async with manager.cold_connection(runtime) as wait_ms:
+                starts.append((asyncio.get_running_loop().time(), wait_ms))
+                active += 1
+                maximum_active = max(maximum_active, active)
+                if active == 2:
+                    both_active.set()
+                await release.wait()
+                active -= 1
+
+        first = asyncio.create_task(worker())
+        second = asyncio.create_task(worker())
+        await asyncio.wait_for(both_active.wait(), 0.3)
+        assert starts[1][0] - starts[0][0] >= 0.02
+        assert starts[1][1] >= 20
+        assert maximum_active == 2
+        release.set()
+        await asyncio.gather(first, second)
+
+    run(scenario())
+
+
+def test_cold_start_spacing_is_independent_per_adapter():
+    configs = (
+        AdapterConfig("a", "AA:00:00:00:00:01", max_cold_connections=2,
+                      cold_start_spacing_s=0.04),
+        AdapterConfig("b", "AA:00:00:00:00:02", max_cold_connections=2,
+                      cold_start_spacing_s=0.04),
+    )
+
+    async def resolver(_):
+        return [
+            ResolvedAdapter("a", configs[0].controller_address, "hci7"),
+            ResolvedAdapter("b", configs[1].controller_address, "hci8"),
+        ]
+
+    manager = AdapterManager(configs, resolver)
+
+    async def scenario():
+        await manager.refresh()
+        a, b = manager._runtime["a"], manager._runtime["b"]
+        async def enter(runtime):
+            async with manager.cold_connection(runtime):
+                return asyncio.get_running_loop().time()
+
+        # While A's second admission is sleeping behind A's spacing gate, B's
+        # first admission must remain immediate.
+        await enter(a)
+        delayed_a = asyncio.create_task(enter(a))
+        await asyncio.sleep(0)
+        started = asyncio.get_running_loop().time()
+        first_b = await enter(b)
+        assert first_b - started < 0.025
+        assert await delayed_a - started >= 0.025
+
+    run(scenario())
+
+
+def test_cancelling_during_cold_start_spacing_releases_slot_and_gate():
+    config = AdapterConfig(
+        "a", "AA:00:00:00:00:01", max_cold_connections=2,
+        cold_start_spacing_s=0.08,
+    )
+
+    async def resolver(_):
+        return [ResolvedAdapter("a", config.controller_address, "hci7")]
+
+    manager = AdapterManager((config,), resolver)
+
+    async def scenario():
+        runtime = (await manager.candidates(
+            BlindConfig("x", "X", "11", False, "1234567")
+        ))[0]
+        release = asyncio.Event()
+        first_entered = asyncio.Event()
+
+        async def holder():
+            async with manager.cold_connection(runtime):
+                first_entered.set()
+                await release.wait()
+
+        async def enter_once():
+            async with manager.cold_connection(runtime):
+                return True
+
+        first = asyncio.create_task(holder())
+        await first_entered.wait()
+        cancelled = asyncio.create_task(enter_once())
+        await asyncio.sleep(0.015)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        # The cancelled waiter released both the start gate and its cold slot.
+        assert await asyncio.wait_for(enter_once(), 0.3)
+        release.set()
+        await first
+
+    run(scenario())
+
+
 def test_loss_and_recovery_rebinds_transient_hci_name_and_updates_health():
     config = AdapterConfig("a", "AA:00:00:00:00:01")
     snapshots = [

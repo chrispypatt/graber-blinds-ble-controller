@@ -36,6 +36,7 @@ class AdapterConfig:
     usb_path: str | None = None
     max_connections: int = 5
     max_cold_connections: int = 1
+    cold_start_spacing_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ def load_config(config_path: str | Path, secrets_path: str | Path) -> Controller
             usb_path=item.get("usb_path"),
             max_connections=int(item.get("max_connections", 5)),
             max_cold_connections=int(item.get("max_cold_connections", 1)),
+            cold_start_spacing_s=float(item.get("cold_start_spacing_s", 0)),
         )
         for item in _table_list(raw, "adapters")
     )
@@ -201,6 +203,10 @@ def _validate(config: ControllerConfig) -> None:
     for adapter in config.adapters:
         if adapter.max_connections < 1 or adapter.max_cold_connections < 1:
             raise ConfigError(f"adapter {adapter.id} limits must be positive")
+        if not 0 <= adapter.cold_start_spacing_s <= 10:
+            raise ConfigError(
+                f"adapter {adapter.id} cold_start_spacing_s must be from 0 through 10"
+            )
     for blind in config.blinds:
         if blind.battery_interval_s <= 0:
             raise ConfigError(f"blind {blind.id} battery_interval_s must be positive")

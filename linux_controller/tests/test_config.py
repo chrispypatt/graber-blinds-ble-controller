@@ -16,6 +16,7 @@ id = "external_a"
 controller_address = "AA:BB:CC:DD:EE:01"
 max_connections = 2
 max_cold_connections = 1
+cold_start_spacing_s = 0.75
 [[blinds]]
 id = "living_left"
 name = "Living Left"
@@ -40,6 +41,18 @@ def test_loads_separate_secrets_without_leaking_repr(tmp_path: Path):
     assert "0123456" not in repr(result)
     assert result.groups[0].members == ("living_left",)
     assert result.blinds[0].battery_interval_s == 3600
+    assert result.adapters[0].cold_start_spacing_s == 0.75
+
+
+@pytest.mark.parametrize("value", (-0.1, 10.1))
+def test_rejects_out_of_range_cold_start_spacing(tmp_path: Path, value: float):
+    config, secrets = write_config(tmp_path)
+    config.write_text(config.read_text().replace(
+        "cold_start_spacing_s = 0.75",
+        f"cold_start_spacing_s = {value}",
+    ))
+    with pytest.raises(ConfigError, match="cold_start_spacing_s must be from 0 through 10"):
+        load_config(config, secrets)
 
 
 def test_rejects_nonpositive_battery_interval(tmp_path: Path):
