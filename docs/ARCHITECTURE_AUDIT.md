@@ -57,15 +57,15 @@ The old ESP identification firmware and inventory helper are not present on
 this Pi-only branch. `graber.identify_cli` replaces them with adapter-specific
 BlueZ scanning, redacted normal output, read-only firmware/battery inspection,
 and explicit mode-`0600` private capture. `graber.identify_web` adds a local
-setup wizard for naming, rail-type confirmation, adapter assignment, and split
-config/secrets export. Jogging is a separate token-gated live mode and is never
-enabled by ordinary identification.
+setup wizard for naming, rail-type confirmation, adapter assignment, and saving
+split topology/credential configuration. Jogging is a separate token-gated
+live mode and is never enabled by ordinary identification.
 
 ## Deployment-specific information still required
 
 Nothing below is fabricated or committed. The private Pi configuration needs:
 
-- Each selected pilot motor's real BLE identity, seven-digit access code, rail
+- Each selected motor's real BLE identity, seven-digit access code, rail
   type, tested firmware, and preferred/fallback adapter assignments.
 - Each external controller address plus USB serial or physical port path,
   observed after individual and combined reboot tests.
@@ -81,15 +81,15 @@ Private files belong outside the checkout: non-secret topology in
 credentials in `secrets.toml` (`0600`, `graber:graber`). Motor addresses and
 access codes must not be emitted in MQTT topics, metrics, or logs.
 
-## Home Assistant pilot treatment
+## Home Assistant integration and cutover
 
-The Pi publishes retained MQTT Discovery documents under a separate migration
-namespace and stable unique IDs. State is non-optimistic; command topics
-are not retained. Existing legacy entities are not renamed, overwritten, or
-deleted. During the pilot, automations must have only one active controller for
+The Pi publishes retained MQTT Discovery documents with stable unique IDs.
+State is non-optimistic; command topics are not retained. During a side-by-side
+migration, use a separate topic/device identity and do not rename, overwrite,
+or delete legacy entities. Automations must have only one active controller for
 each blind. After acceptance testing, cut over automation targets deliberately,
 preserve friendly names/dashboard placement where practical, and disable (do
-not erase) the old ESP automation path. Physical remotes and the Graber app are
+not erase) the old automation path. Physical remotes and the Graber app are
 never re-paired or modified.
 
 ## BlueZ/Bleak constraints to validate on the Pi

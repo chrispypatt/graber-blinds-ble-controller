@@ -85,9 +85,26 @@ sudo systemctl restart graber-controller
 sudo systemctl stop graber-controller
 ```
 
-Keep MQTT disabled until the broker, authentication, TLS settings, unique
-device ID, and topic prefix are verified. Never leave two automated
-controller paths active for the same shade.
+The control page reports observed rail positions, battery values, command
+progress, and adapter health. A movement command progresses through bounded
+states such as queued, running, awaiting feedback, and a terminal result. A
+write acknowledged by the motor is not treated as proof that it moved.
+
+## Home Assistant
+
+Home Assistant integration uses an existing MQTT broker and MQTT Discovery.
+The wizard does not install a broker. Before enabling MQTT, create a dedicated
+non-administrator broker account, choose a stable controller device ID and
+topic prefix, and put the credentials only in private `secrets.toml`.
+
+Enable MQTT in `config.toml`, restart the controller, and verify the discovered
+cover, battery, diagnostic, availability, and adapter-health entities before
+changing dashboards or automations. Movement command topics are never retained.
+Use broker TLS when it is available; see [Security and privacy](SECURITY.md).
+
+Never leave two automated controller paths active for the same shade. Follow
+the [cutover and rollback procedure](RPI5_MIGRATION.md#home-assistant-cutover)
+when replacing another controller.
 
 ## Update or roll back
 

@@ -14,9 +14,15 @@ actions additionally require a non-placeholder private token and explicit live
 gate. Do not port-forward either UI. They use plain HTTP on the trusted LAN; add
 a separately managed authenticated TLS reverse proxy if encryption is needed.
 
+Use a dedicated, non-administrator MQTT account with a randomly generated
+password. Store it only in private `secrets.toml`. Prefer broker TLS with
+hostname verification; plain MQTT exposes credentials and commands to anyone
+able to observe that network segment. Do not expose the broker to the internet.
+
 MQTT movement commands are never retained. Duplicate QoS deliveries reuse an
-in-memory ID, and movement queues do not survive restart. Discovery uses
-separate controller IDs during migration.
+in-memory ID, and movement queues do not survive restart. Discovery can use
+separate controller IDs during migration; keep the chosen production ID stable
+after cutover to avoid duplicate entities.
 
 Identification output is redacted by default. Full captures require an explicit
 path and are mode `0600`; candidate access-code reads require another explicit

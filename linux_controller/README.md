@@ -1,9 +1,13 @@
-# Linux controller (Phase A)
+# Linux controller
 
 This package is the independently deployable Raspberry Pi/BlueZ implementation.
 Live Bluetooth and web movement controls remain disabled until private
 configuration is supplied and the supervised pilot steps in
-`docs/RPI5_MIGRATION.md` are followed.
+`../docs/RPI5_MIGRATION.md` are followed.
+
+For deployment, use `deploy/install.sh` and complete the browser setup wizard
+described in `../docs/RPI5_SETUP.md`. Manual configuration and command-line
+identification are diagnostic alternatives, not required setup steps.
 
 Run offline tests from the repository root:
 

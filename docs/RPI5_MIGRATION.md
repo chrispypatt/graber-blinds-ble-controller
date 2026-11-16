@@ -44,7 +44,7 @@ output. Verify motor model, single/TDBU type, firmware, address, and any existin
 HA entity mapping against the private deployed configuration.
 
 The setup wizard may be used here without `--allow-jog` to name devices and
-export draft configuration. Enable its jog gate only in Phase C after entering
+save draft configuration. Enable its jog gate only in Phase C after entering
 a verified/candidate access code, with the room supervised and legacy
 automations disabled for that blind.
 
@@ -121,12 +121,21 @@ Full TDBU open therefore reports bottom 100/top 0, and full close reports
 bottom 0/top 0. The two cover entities describe rail locations; they do not
 promise that two arbitrary absolute targets persist together.
 
-Discovery includes individual rail covers and command-only group covers. Group
-entities accept Open, Close, and Stop but do not publish an invented aggregate
-position. Blind and group command topics are distinct even when their IDs are
-the same. On every broker reconnect the controller republishes its currently
-observed positions, diagnostics, and per-blind availability. Retained movement
-commands are always ignored.
+Discovery includes single-rail covers, separate TDBU rail covers, diagnostics,
+and command-only group covers. Groups with one member remain internal command
+targets and do not create redundant Home Assistant entities. Multi-member
+groups receive a cover for Open, Close, and Stop plus a Favorite action. Stack
+Up/Down actions are discovered only for groups whose known members are all
+TDBU. Group covers do not publish an invented aggregate position. Blind and
+group command topics remain distinct even when their IDs match.
+
+Diagnostics report `queued`, `running`, `write_acknowledged`, and
+`awaiting_feedback` while an operation is active. Terminal results distinguish
+`completed`, `completion_unconfirmed`, and `failed`. An acknowledged movement
+that lacks fresh position feedback is bounded by `feedback_timeout_s`, reported
+as unconfirmed, and not replayed automatically. On every broker reconnect the
+controller republishes currently observed positions, diagnostics, and
+per-blind availability. Retained movement commands are always ignored.
 
 When pilot acceptance is complete:
 
@@ -138,6 +147,11 @@ When pilot acceptance is complete:
    first run.
 5. Preserve old entities disabled/available for rollback until the observation
    period passes. Do not delete them during the pilot.
+
+After cutover, expose native cover entities to voice assistants for Open,
+Close, Stop, and position control where supported. Keep scripts only for
+Favorite or protocol-specific TDBU actions. Treat broker TLS/web authentication
+hardening as a separate prerequisite before expanding remote or voice access.
 
 ## Rollback
 

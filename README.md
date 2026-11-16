@@ -37,41 +37,13 @@ Then read the [architecture audit](docs/ARCHITECTURE_AUDIT.md),
 
 ## Identification and setup
 
-### Setup key
+Install the service, retrieve its setup key, and open the web wizard. The
+wizard scans, identifies, names, groups, and saves shades, then switches the
+same address to the control page. See the [Pi setup guide](docs/RPI5_SETUP.md).
 
-The setup key is stored in the token file selected by
-`GRABER_SETUP_TOKEN_FILE`. With the default install paths, retrieve it on the
-Pi with:
-
-```sh
-sudo cat /var/lib/graber-controller/setup-token
-```
-
-If the install uses a custom state directory, read the token file configured in
-the private setup-wizard environment file instead.
-
-List stable external adapters, then scan through one explicit USB controller:
-
-```sh
-python -m graber.diagnostic_cli adapters --show-private
-python -m graber.identify_cli --controller-address CONTROLLER_ADDRESS --seconds 20
-```
-
-Normal output redacts motor identities. A private mode-`0600` capture can add
-read-only firmware, battery, and explicitly requested candidate access-code
-data:
-
-```sh
-python -m graber.identify_cli \
-  --controller-address CONTROLLER_ADDRESS --inspect \
-  --read-candidate-access-code \
-  --capture-private private/shade-inventory.json
-```
-
-The identification tool also provides a LAN-restricted setup web view for
-scanning, naming, assigning adapters, and exporting split public/secrets
-configuration. Jog controls require a separate explicit live-jog gate and
-token; ordinary identification never moves a blind.
+Command-line adapter, inventory, and performance tools remain available for
+diagnostics. Their normal output redacts motor identities; private captures are
+written only to an explicit mode-`0600` path.
 
 ## Layout
 

@@ -22,11 +22,11 @@ architecture constraints.
 | Top notification | same | `900EEAEB-0F27-4808-809C-4026A8FD7D5A` |
 | Battery | standard Battery Service | `2A19` |
 
-The dispatcher authenticates, discovers and caches handles, subscribes to rail
-notifications, sends one command at a time, and keeps a successful connection
-warm briefly so Stop or a follow-up command does not pay another cold-connect
-penalty. Cold BLE link establishment is serialized on ESP32 because concurrent
-connection creation proved unreliable in testing.
+The historical dispatcher authenticated, discovered and cached handles,
+subscribed to rail notifications, sent one command at a time, and kept a
+successful connection warm briefly so Stop or a follow-up command did not pay
+another cold-connect penalty. Its ESP32 cold-link serialization was a platform
+workaround, not a Linux architecture requirement.
 
 ## Commands observed in the official app
 
@@ -68,9 +68,10 @@ The dispatcher exposes these as Stack Up / Stack Down buttons on TDBU devices.
 They use the normal authenticated connection, serialized command queue, and
 fresh samples from both rail feedback streams. Completion requires the
 positions to remain stable for at least 600 ms; missing feedback ends with an
-explicit timeout. Stop continues to send `0x10` to auth and Execute. Group stack
-actions are generated only for the explicitly listed `tdbu_blinds` members;
-the bulk readiness barrier applies before release.
+explicit timeout. Stop continues to send `0x10` to auth and Execute. The Linux
+controller exposes group stack actions only when every configured member is
+known to be TDBU; its best-effort and synchronized group policies are
+independent of the protocol bytes described here.
 
 This does not establish that two arbitrary absolute rail targets can coexist.
 The dispatcher rejects mode 8 (sequential paired absolute targets): the tested
@@ -90,10 +91,13 @@ top value is inverted when exposed as a cover position.
 
 ## Limits
 
-- ESP32 builds are intentionally limited to three BLE clients.
+- The historical ESP32 build was intentionally limited to three BLE clients;
+  this is not a Linux or protocol limit. Linux adapter concurrency remains a
+  deployment measurement, not a guaranteed capacity.
 - Advertised position bytes are useful but are validated against GATT
   notifications during active commands.
 - Battery readings can be wrong on the motor itself; a value also reported as
   zero by the official app is not corrected by this project.
-- Range and cold connection latency are physical constraints. Split controllers
-  by location instead of increasing the ESP32 connection count.
+- Range and cold connection latency are physical constraints. Adapter
+  assignment and connection concurrency must be validated on installed
+  hardware.
