@@ -201,6 +201,13 @@ class SetupSession:
         await asyncio.gather(task, return_exceptions=True)
         return True
 
+    def clear_scan_results(self) -> int:
+        if self.ble_lock.locked():
+            raise ValueError("wait for the active Bluetooth operation to finish")
+        count = len(self.devices)
+        self.devices.clear()
+        return count
+
     def scan_state(self) -> dict[str, Any]:
         active = self.scan_task is not None and not self.scan_task.done()
         duration = self.scan_duration_s or 0
@@ -464,6 +471,13 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
         authorize(request)
         return web.json_response({"cancelled": await session.cancel_scan()})
 
+    async def clear_scan(request: Any) -> Any:
+        authorize(request)
+        cleared = session.clear_scan_results()
+        payload = session.state(allow_jog=settings.allow_jog)
+        payload["cleared"] = cleared
+        return web.json_response(payload)
+
     async def configure(request: Any) -> Any:
         authorize(request)
         key = request.match_info["key"]
@@ -510,6 +524,7 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
     app.router.add_get("/api/state", state)
     app.router.add_post("/api/scan", start_scan)
     app.router.add_post("/api/scan/cancel", cancel_scan)
+    app.router.add_post("/api/scan/clear", clear_scan)
     app.router.add_post("/api/devices/{key}/configure", configure)
     app.router.add_post("/api/devices/{key}/inspect", inspect)
     app.router.add_post("/api/devices/{key}/jog", jog)

@@ -178,6 +178,13 @@ def test_scan_survives_request_task_cancellation(tmp_path: Path):
     asyncio.run(scenario())
 
 
+def test_clear_scan_results_removes_devices(tmp_path: Path):
+    session, _ = make_session(tmp_path)
+    assert session.clear_scan_results() == 1
+    assert session.devices == {}
+    assert session.clear_scan_results() == 0
+
+
 def test_known_credentials_reject_insecure_permissions(tmp_path: Path):
     secrets_path = tmp_path / "known-secrets.toml"
     secrets_path.write_text(
