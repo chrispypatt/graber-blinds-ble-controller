@@ -25,6 +25,10 @@ an HTTPS reverse proxy. The Caddy example uses an internal CA; every client must
 trust that CA root before relying on it. Do not bypass certificate warnings,
 port-forward the UI, or treat CIDR filtering as encryption.
 
+Treat the Caddy data directory as private backup material because it contains
+the local CA private key. Distribute only the public root certificate to client
+devices and verify its fingerprint through a trusted channel.
+
 Use a dedicated, non-administrator MQTT account with a randomly generated
 password. Store it only in private `secrets.toml`. Prefer broker TLS with
 hostname verification; plain MQTT exposes credentials and commands to anyone

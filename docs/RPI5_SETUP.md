@@ -134,6 +134,9 @@ and adapt the example Caddyfile. It rejects clients outside private address
 ranges. Caddy's internal CA is not automatically trusted
 by other devices; install its root certificate on every client that uses the
 portal. Keep the Pi portal on loopback and do not expose Caddy to the internet.
+Back up Caddy's data directory with the other encrypted controller backups. It
+contains the private CA key; never publish or copy that key to client devices.
+Clients need only the public `root.crt` certificate.
 
 ## Home Assistant
 
