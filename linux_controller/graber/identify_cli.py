@@ -72,7 +72,7 @@ class MotorObservation:
 
     @property
     def motor_type_candidate(self) -> str:
-        return "tdbu_candidate" if self.top_raw is not None else "single_rail_candidate"
+        return "tdbu_candidate" if self.top_raw is not None and self.top_raw > 0 else "unknown"
 
 
 def decode_candidate_access_code(raw: bytes) -> str | None:

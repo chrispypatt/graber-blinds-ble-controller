@@ -34,6 +34,19 @@ Then read the [architecture audit](docs/ARCHITECTURE_AUDIT.md),
 
 ## Identification and setup
 
+### Setup key
+
+The setup key is stored in the token file selected by
+`GRABER_SETUP_TOKEN_FILE`. With the default install paths, retrieve it on the
+Pi with:
+
+```sh
+sudo cat /var/lib/graber-controller/setup-token
+```
+
+If the install uses a custom state directory, read the token file configured in
+the private setup-wizard environment file instead.
+
 List stable external adapters, then scan through one explicit USB controller:
 
 ```sh

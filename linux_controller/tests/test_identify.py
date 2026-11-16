@@ -22,6 +22,14 @@ def test_observation_extracts_candidate_rails_without_claiming_verified_type():
     assert item.rssi_median == -61
 
 
+def test_zero_top_position_does_not_claim_single_or_tdbu_type():
+    item = MotorObservation("RRBZ_TEST", "11:22:33:44:55:66", top_raw=0)
+    assert item.motor_type_candidate == "unknown"
+
+    item.top_raw = None
+    assert item.motor_type_candidate == "unknown"
+
+
 def test_access_code_requires_exact_ascii_digits():
     assert decode_candidate_access_code(b"0123456") == "0123456"
     assert decode_candidate_access_code(b"\x10") is None

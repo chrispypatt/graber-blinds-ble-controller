@@ -157,7 +157,8 @@ class SetupSession:
                         continue
                     default_id = slug(motor.name)
                     self.devices[key] = DeviceSetup(
-                        motor, default_id, motor.name, False, adapter_id,
+                        motor, default_id, motor.name,
+                        motor.motor_type_candidate == "tdbu_candidate", adapter_id,
                         group="",
                         configured=False,
                         access_code=self.known_credentials.get(motor.address.upper()),

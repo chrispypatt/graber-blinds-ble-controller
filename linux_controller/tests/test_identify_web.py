@@ -101,6 +101,32 @@ def test_known_credentials_prefill_by_address_but_never_reach_browser(tmp_path: 
     assert load_config(config_path, exported_secrets).blinds[0].access_code == "0123456"
 
 
+def test_scan_suggests_tdbu_only_for_nonzero_top_position(tmp_path: Path):
+    adapter = AdapterIdentity(
+        "hci4", "AA:BB:CC:DD:EE:FF", True, "1234", "5678",
+        usb_product="FSC-BP119", usb_serial="adapter-a", usb_path="1-2.3",
+    )
+    session = SetupSession([adapter], export_dir=tmp_path)
+
+    async def fake_scan(_adapter, _seconds):
+        return [
+            MotorObservation("RRBZ_TDBU", "11:22:33:44:55:66", [-55], 10, 70),
+            MotorObservation("RRBZ_AMBIGUOUS", "11:22:33:44:55:77", [-55], 10, 0),
+        ]
+
+    import graber.identify_web as identify_web
+    original = identify_web.scan
+    identify_web.scan = fake_scan
+    try:
+        asyncio.run(session.scan_all())
+    finally:
+        identify_web.scan = original
+
+    devices = {item.observation.name: item for item in session.devices.values()}
+    assert devices["RRBZ_TDBU"].dual_rail is True
+    assert devices["RRBZ_AMBIGUOUS"].dual_rail is False
+
+
 def test_known_credentials_reject_insecure_permissions(tmp_path: Path):
     secrets_path = tmp_path / "known-secrets.toml"
     secrets_path.write_text(
