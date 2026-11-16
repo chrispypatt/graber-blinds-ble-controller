@@ -54,7 +54,8 @@ class Controller:
     """Facade used by MQTT, web, and main without exposing BLE internals."""
 
     def __init__(self, dispatchers: dict[str, BlindDispatcher], groups: tuple[GroupConfig, ...],
-                 adapter_health_provider: Callable[[], Mapping[str, object]] | None = None):
+                 adapter_health_provider: Callable[[], Mapping[str, object]] | None = None,
+                 telemetry: Callable[[str, dict[str, object]], None] | None = None):
         self.dispatchers = dispatchers
         self.groups = {item.id: item for item in groups}
         self._diagnostics = {
@@ -68,6 +69,7 @@ class Controller:
         }
         self._result_listener: Callable[[str, dict[str, object]], None] | None = None
         self._adapter_health_provider = adapter_health_provider or (lambda: {})
+        self._telemetry = telemetry or (lambda _event, _fields: None)
         for dispatcher in self.dispatchers.values():
             setter = getattr(dispatcher, "set_lifecycle_listener", None)
             if setter is not None:
@@ -156,7 +158,9 @@ class Controller:
             not item.blind.config.dual_rail for item in members
         ):
             raise ValueError(f"{action} requires an all-TDBU group")
-        result = await self._group(self.groups[target_id], command_id, kind, rail, raw_position)
+        result = await self._group(
+            self.groups[target_id], command_id, kind, rail, raw_position, source
+        )
         for member_result in result.results.values():
             self._record_result(member_result)
         return result
@@ -170,13 +174,19 @@ class Controller:
         }
 
     async def _group(self, group: GroupConfig, command_id: str, kind: CommandKind,
-                     rail: Rail | None, position: int | None) -> GroupResult:
+                     rail: Rail | None, position: int | None, source: str) -> GroupResult:
+        started = time.monotonic()
         members = [item for item in group.members if item in self.dispatchers]
+        self._telemetry("group_command_received", {
+            "command_id": command_id, "group_id": group.id, "source": source,
+            "mode": group.mode, "kind": kind.value, "member_count": len(members),
+        })
         preparation_errors: dict[str, str] = {}
         ready = list(members)
         # STOP is an interrupt, not a synchronized movement. Preparing every
         # member first would delay it behind the operations it must supersede.
         if group.mode == "synchronized" and kind is not CommandKind.STOP:
+            prepare_started = time.monotonic()
             async def prepare(blind_id: str) -> None:
                 try:
                     await self.dispatchers[blind_id].blind.prepare()
@@ -191,9 +201,31 @@ class Controller:
                     if (not session or not session.connection.connected) and item not in preparation_errors:
                         preparation_errors[item] = "preparation deadline exceeded"
             ready = [item for item in members if item not in preparation_errors]
+            self._telemetry("group_preparation_completed", {
+                "command_id": command_id, "group_id": group.id, "mode": group.mode,
+                "prepare_ms": (time.monotonic() - prepare_started) * 1000,
+                "ready_count": len(ready),
+                "preparation_failure_count": len(preparation_errors),
+                "failed_members": sorted(preparation_errors),
+            })
             if preparation_errors and group.partial_failure == "abort":
+                self._emit_group_summary(
+                    group, command_id, started, members, [], {}, preparation_errors,
+                )
                 return GroupResult(command_id, group.id, {}, preparation_errors)
+        release_started = time.monotonic()
+        dispatch_times: dict[str, float] = {}
+        self._telemetry("group_commands_released", {
+            "command_id": command_id, "group_id": group.id, "mode": group.mode,
+            "ready_count": len(ready), "elapsed_ms": (release_started - started) * 1000,
+        })
         async def run(blind_id: str) -> tuple[str, CommandResult]:
+            dispatched_at = time.monotonic()
+            dispatch_times[blind_id] = dispatched_at
+            self._telemetry("group_member_dispatched", {
+                "command_id": command_id, "group_id": group.id, "blind_id": blind_id,
+                "dispatch_offset_ms": (dispatched_at - release_started) * 1000,
+            })
             command = BlindCommand(f"{command_id}:{blind_id}", kind, rail, position, time.time())
             return blind_id, await self.dispatchers[blind_id].submit(command)
         gathered = await asyncio.gather(*(run(item) for item in ready), return_exceptions=True)
@@ -206,7 +238,58 @@ class Controller:
                 )))
             else:
                 pairs.append(value)
-        return GroupResult(command_id, group.id, dict(pairs), preparation_errors)
+        results = dict(pairs)
+        for blind_id, member_result in results.items():
+            self._telemetry("group_member_completed", {
+                "command_id": command_id, "group_id": group.id, "blind_id": blind_id,
+                "outcome": member_result.outcome.value,
+                "adapter_id": member_result.adapter_id,
+                "attempts": member_result.attempts,
+                "movement_start_ms": member_result.movement_start_ms,
+            })
+        self._emit_group_summary(
+            group, command_id, started, members, ready, results, preparation_errors,
+            dispatch_times=dispatch_times, release_started=release_started,
+        )
+        return GroupResult(command_id, group.id, results, preparation_errors)
+
+    def _emit_group_summary(
+        self, group: GroupConfig, command_id: str, started: float,
+        members: list[str], ready: list[str], results: dict[str, CommandResult],
+        preparation_errors: dict[str, str], *,
+        dispatch_times: dict[str, float] | None = None,
+        release_started: float | None = None,
+    ) -> None:
+        movement_starts = [
+            item.movement_start_ms for item in results.values()
+            if item.movement_start_ms is not None
+        ]
+        completed_count = sum(
+            item.outcome is Outcome.COMPLETED for item in results.values()
+        )
+        dispatch_offsets = [
+            (value - release_started) * 1000
+            for value in (dispatch_times or {}).values()
+            if release_started is not None
+        ]
+        self._telemetry("group_command_completed", {
+            "command_id": command_id, "group_id": group.id, "mode": group.mode,
+            "duration_ms": (time.monotonic() - started) * 1000,
+            "member_count": len(members), "released_count": len(ready),
+            "completed_count": completed_count,
+            "failed_count": len(results) - completed_count,
+            "preparation_failure_count": len(preparation_errors),
+            "movement_observed_count": len(movement_starts),
+            "movement_start_spread_ms": (
+                max(movement_starts) - min(movement_starts)
+                if len(movement_starts) >= 2 else 0.0 if movement_starts else None
+            ),
+            "dispatch_spread_ms": (
+                max(dispatch_offsets) - min(dispatch_offsets)
+                if len(dispatch_offsets) >= 2 else 0.0 if dispatch_offsets else None
+            ),
+            "outcomes": sorted({item.outcome.value for item in results.values()}),
+        })
 
     def snapshot(self) -> dict[str, object]:
         blinds = {}

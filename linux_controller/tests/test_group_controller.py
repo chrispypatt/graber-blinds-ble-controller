@@ -59,6 +59,53 @@ def test_best_effort_failure_does_not_block_other_blinds():
     asyncio.run(scenario())
 
 
+def test_best_effort_group_telemetry_reports_dispatch_and_movement_spread():
+    class TimedDispatcher(FakeDispatcher):
+        def __init__(self, blind_id, movement_start_ms):
+            super().__init__(blind_id)
+            self.movement_start_ms = movement_start_ms
+
+        async def submit(self, command):
+            self.commands.append(command)
+            return CommandResult(
+                command.id, self.blind.config.id, Outcome.COMPLETED,
+                adapter_id="external", attempts=1,
+                movement_start_ms=self.movement_start_ms,
+            )
+
+    async def scenario():
+        events = []
+        dispatchers = {
+            "a": TimedDispatcher("a", 1000),
+            "b": TimedDispatcher("b", 1450),
+        }
+        controller = Controller(
+            dispatchers, (GroupConfig("living", "Living", ("a", "b")),),
+            telemetry=lambda event, fields: events.append((event, fields)),
+        )
+        result = await controller.submit_command(
+            "living", "open", command_id="group", source="mqtt",
+            target_type="group",
+        )
+        assert result.successful
+        names = [event for event, _ in events]
+        assert names.count("group_command_received") == 1
+        assert names.count("group_commands_released") == 1
+        assert names.count("group_member_dispatched") == 2
+        assert names.count("group_member_completed") == 2
+        summary = [fields for event, fields in events
+                   if event == "group_command_completed"][0]
+        assert summary["group_id"] == "living"
+        assert summary["mode"] == "best_effort"
+        assert summary["member_count"] == 2
+        assert summary["completed_count"] == 2
+        assert summary["movement_observed_count"] == 2
+        assert summary["movement_start_spread_ms"] == 450
+        assert summary["dispatch_spread_ms"] >= 0
+
+    asyncio.run(scenario())
+
+
 def test_active_lifecycle_replaces_stale_terminal_status_and_clears_on_result():
     dispatcher = FakeDispatcher("a")
     controller = Controller({"a": dispatcher}, ())
@@ -86,6 +133,33 @@ def test_synchronized_release_ready_omits_failed_preparation():
         )
         assert set(result.results) == {"b"}
         assert "a" in result.preparation_errors
+    asyncio.run(scenario())
+
+
+def test_synchronized_group_telemetry_reports_preparation_failure():
+    async def scenario():
+        events = []
+        dispatchers = {
+            "a": FakeDispatcher("a", prepare_error="missing"),
+            "b": FakeDispatcher("b"),
+        }
+        group = GroupConfig(
+            "living", "Living", ("a", "b"), "synchronized", 1, "release_ready"
+        )
+        await Controller(
+            dispatchers, (group,),
+            telemetry=lambda event, fields: events.append((event, fields)),
+        ).submit_command("living", "close", command_id="group", source="web")
+        prepared = [fields for event, fields in events
+                    if event == "group_preparation_completed"][0]
+        assert prepared["ready_count"] == 1
+        assert prepared["preparation_failure_count"] == 1
+        assert prepared["failed_members"] == ["a"]
+        summary = [fields for event, fields in events
+                   if event == "group_command_completed"][0]
+        assert summary["released_count"] == 1
+        assert summary["preparation_failure_count"] == 1
+
     asyncio.run(scenario())
 
 

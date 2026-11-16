@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 
 from graber.adapter_manager import AdapterManager, ResolvedAdapter
@@ -98,25 +99,80 @@ def test_connect_subscribe_auth_then_verified_command():
     asyncio.run(scenario())
 
 
-def test_command_telemetry_reports_cold_queue_wait():
+def test_command_telemetry_reports_complete_pipeline_without_secrets():
     async def scenario():
         events = []
         blind = make_controller(
             FakeConnection(),
             telemetry=lambda event, fields: events.append((event, fields)),
         )
-        result = await blind.execute(
-            BlindCommand("queue-timing", CommandKind.SET_POSITION, Rail.BOTTOM, 42)
-        )
+        result = await blind.execute(BlindCommand(
+            "queue-timing", CommandKind.SET_POSITION, Rail.BOTTOM, 42,
+            received_at=time.time() - 0.02,
+        ))
         acquired = [fields for event, fields in events
                     if event == "cold_connection_slot_acquired"]
+        ready = [fields for event, fields in events if event == "connection_ready"]
+        write_acks = [fields for event, fields in events
+                      if event == "gatt_write_acknowledged"]
+        feedback = [fields for event, fields in events if event == "feedback_observed"]
         completed = [fields for event, fields in events if event == "command_completed"]
         assert len(acquired) == 1
         assert acquired[0]["command_id"] == "queue-timing"
         assert acquired[0]["adapter_id"] == "external"
         assert acquired[0]["cold_queue_ms"] >= 0
         assert result.cold_queue_ms == acquired[0]["cold_queue_ms"]
-        assert completed[0]["cold_queue_ms"] == result.cold_queue_ms
+        assert ready[0]["operation"] == "command"
+        assert ready[0]["notify_setup_ms"] >= 0
+        assert ready[0]["gatt_setup_ms"] >= ready[0]["notify_setup_ms"]
+        assert ready[0]["auth_ms"] >= 0
+        assert len(write_acks) == 2
+        assert all(item["write_ack_ms"] >= 0 for item in write_acks)
+        assert [item["effectful"] for item in write_acks] == [False, True]
+        assert len(feedback) == 1
+        assert feedback[0]["feedback_first_sample_ms"] >= 0
+        terminal = completed[0]
+        assert terminal["controller_queue_ms"] >= 15
+        assert terminal["cold_queue_ms"] == result.cold_queue_ms
+        assert terminal["discovery_ms"] >= 0
+        assert terminal["connect_ms"] >= 0
+        assert terminal["notify_setup_ms"] >= 0
+        assert terminal["gatt_setup_ms"] >= terminal["notify_setup_ms"]
+        assert terminal["auth_ms"] >= 0
+        assert terminal["command_ack_ms"] >= 0
+        assert terminal["feedback_first_sample_ms"] >= 0
+        assert terminal["feedback_ms"] >= terminal["feedback_first_sample_ms"]
+        assert terminal["warm_connection"] is False
+        assert "0123456" not in json.dumps(events, default=str)
+        await blind.close()
+        disconnected = [fields for event, fields in events if event == "disconnected"]
+        assert disconnected[-1]["reason"] == "shutdown"
+        assert disconnected[-1]["command_count"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_warm_connection_reuse_is_measured_without_second_connect():
+    async def scenario():
+        events = []
+        blind = make_controller(
+            FakeConnection(),
+            telemetry=lambda event, fields: events.append((event, fields)),
+        )
+        first = await blind.execute(
+            BlindCommand("first", CommandKind.SET_POSITION, Rail.BOTTOM, 42)
+        )
+        second = await blind.execute(
+            BlindCommand("second", CommandKind.SET_POSITION, Rail.BOTTOM, 42)
+        )
+        assert first.warm_connection is False
+        assert second.warm_connection is True
+        assert second.connection_age_ms is not None
+        assert second.connection_age_ms >= 0
+        assert blind._transport.connect_calls == 1
+        reused = [fields for event, fields in events if event == "connection_reused"]
+        assert reused[-1]["command_id"] == "second"
+        assert reused[-1]["operation"] == "command"
         await blind.close()
 
     asyncio.run(scenario())
@@ -139,6 +195,8 @@ def test_final_ack_without_feedback_is_not_replayed():
         blind = make_controller(connection, feedback_timeout=0.03)
         result = await blind.execute(BlindCommand("one", CommandKind.SET_POSITION, Rail.BOTTOM, 42))
         assert result.outcome is Outcome.COMPLETION_UNCONFIRMED
+        assert result.error_category == "completion_unconfirmed"
+        assert result.feedback_ms is not None
         assert [write for write in connection.writes if write[1] == b"\x14"] == [
             (AUTH_CHARACTERISTIC, b"\x14")
         ]
@@ -149,11 +207,21 @@ def test_final_ack_without_feedback_is_not_replayed():
 
 def test_connection_failure_retries_before_any_command_write():
     async def scenario():
+        events = []
         connection = FakeConnection()
-        blind = make_controller(connection, failures=1)
+        blind = make_controller(
+            connection, failures=1,
+            telemetry=lambda event, fields: events.append((event, fields)),
+        )
         result = await blind.execute(BlindCommand("retry", CommandKind.SET_POSITION, Rail.BOTTOM, 42))
         assert result.outcome is Outcome.COMPLETED
         assert result.attempts == 2
+        failed = [fields for event, fields in events if event == "connection_attempt_failed"]
+        scheduled = [fields for event, fields in events if event == "command_retry_scheduled"]
+        assert failed[0]["error_category"] == "bluez"
+        assert scheduled[0]["error_category"] == "bluez"
+        assert scheduled[0]["next_attempt"] == 2
+        assert scheduled[0]["backoff_ms"] == 0
         await blind.close()
     asyncio.run(scenario())
 
@@ -230,15 +298,27 @@ def test_tdbu_advertisement_keeps_both_rail_values_in_raw_coordinates():
 
 def test_refresh_status_reads_rails_and_battery_without_movement_write():
     async def scenario():
+        events = []
         connection = FakeConnection(reads={
             BOTTOM_POSITION_CHARACTERISTIC: b"\x1f",
             TOP_POSITION_CHARACTERISTIC: b"\x47",
             BATTERY_CHARACTERISTIC: b"\x58",
         })
-        blind = make_controller(connection, dual=True)
+        blind = make_controller(
+            connection, dual=True,
+            telemetry=lambda event, fields: events.append((event, fields)),
+        )
         state = await blind.refresh_status()
         assert (state.bottom, state.top, state.battery) == (31, 71, 88)
         assert connection.writes == [(AUTH_CHARACTERISTIC, b"0123456")]
         assert blind._transport.connect_calls == 1
+        refreshed = [fields for event, fields in events if event == "status_refreshed"]
+        assert len(refreshed) == 1
+        assert refreshed[0]["total_latency_ms"] >= 0
+        assert refreshed[0]["rail_read_ms"] >= 0
+        assert refreshed[0]["battery_read_ms"] >= 0
+        assert refreshed[0]["connect_ms"] >= 0
+        ready = [fields for event, fields in events if event == "connection_ready"]
+        assert ready[0]["operation"] == "status_refresh"
         await blind.close()
     asyncio.run(scenario())

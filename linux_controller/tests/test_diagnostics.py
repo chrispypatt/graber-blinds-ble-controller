@@ -12,7 +12,10 @@ from graber.diagnostics import (
     adapter_as_dict,
     adapter_preflight,
     discover_adapters,
+    filter_records,
     load_jsonl,
+    load_jsonl_files,
+    parse_time_boundary,
     select_adapter,
     summarize_operations,
 )
@@ -167,10 +170,12 @@ def test_load_jsonl_rejects_non_object(tmp_path: Path) -> None:
 def test_bounded_writer_records_only_terminal_operations(tmp_path: Path) -> None:
     path = tmp_path / "metrics.jsonl"
     writer = JsonlMetricsWriter(path, max_bytes=1)
-    writer.record("connection_ready", {"blind_id": "left"})
+    writer.record("unrecorded_debug_noise", {"blind_id": "left"})
     assert not path.exists()
+    writer.record("connection_ready", {"blind_id": "left", "gatt_setup_ms": 10})
+    assert load_jsonl(path)[0]["gatt_setup_ms"] == 10
     writer.record("command_completed", {"blind_id": "left", "outcome": "completed"})
-    assert load_jsonl(path)[0]["blind_id"] == "left"
+    assert load_jsonl(path)[0]["event"] == "command_completed"
     writer.record("command_failed", {"blind_id": "right", "outcome": "failed"})
     assert path.with_suffix(".jsonl.1").exists()
     assert load_jsonl(path)[0]["blind_id"] == "right"
@@ -187,3 +192,84 @@ def test_connection_events_measure_first_attempt_independently_of_command_result
     assert summary["connection_attempts"] == 2
     assert summary["first_attempt_connection_success"] == 0
     assert summary["eventual_connection_success"] == 1.0
+
+
+def test_continuous_summary_breaks_down_stages_blinds_adapters_and_failures() -> None:
+    start = 1_700_000_000.0
+    records = [
+        {"event": "command_received", "recorded_at": start, "command_id": "c1",
+         "blind_id": "left", "controller_queue_ms": 12},
+        {"event": "connection_attempt_started", "recorded_at": start + 1,
+         "command_id": "c1", "blind_id": "left", "adapter_id": "a", "attempt": 1},
+        {"event": "connection_attempt_failed", "recorded_at": start + 2,
+         "command_id": "c1", "blind_id": "left", "adapter_id": "a", "attempt": 1,
+         "error": "TimeoutError: /org/bluez/private-device"},
+        {"event": "command_retry_scheduled", "recorded_at": start + 3,
+         "command_id": "c1", "blind_id": "left", "adapter_id": "a", "attempt": 1},
+        {"event": "connection_attempt_started", "recorded_at": start + 4,
+         "command_id": "c1", "blind_id": "left", "adapter_id": "a", "attempt": 2},
+        {"event": "connection_attempt_succeeded", "recorded_at": start + 5,
+         "command_id": "c1", "blind_id": "left", "adapter_id": "a", "attempt": 2,
+         "cold_queue_ms": 300, "discovery_ms": 2, "connect_ms": 2500},
+        {"event": "connection_ready", "recorded_at": start + 6,
+         "command_id": "c1", "blind_id": "left", "adapter_id": "a", "attempt": 2,
+         "notify_setup_ms": 60, "gatt_setup_ms": 170, "auth_ms": 100,
+         # Duplicate connection fields must not create extra samples.
+         "connect_ms": 2500},
+        {"event": "feedback_observed", "recorded_at": start + 7,
+         "command_id": "c1", "blind_id": "left", "adapter_id": "a",
+         "feedback_first_sample_ms": 700},
+        {"event": "command_completed", "recorded_at": start + 8,
+         "command_id": "c1", "blind_id": "left", "adapter_id": "a", "attempts": 2,
+         "outcome": "completed", "movement_observed": True, "command_ack_ms": 150,
+         "movement_start_ms": 800, "feedback_ms": 900, "total_latency_ms": 5000},
+        {"event": "group_command_received", "recorded_at": start + 86400,
+         "command_id": "g1", "group_id": "main", "member_count": 1},
+        {"event": "group_command_completed", "recorded_at": start + 86401,
+         "command_id": "g1", "group_id": "main", "duration_ms": 5100,
+         "movement_start_spread_ms": 0, "dispatch_spread_ms": 4, "failed_count": 0},
+    ]
+    summary = summarize_operations(records)
+    assert summary["period"]["records"] == len(records)
+    assert len(summary["daily"]) == 2
+    assert summary["first_attempt_connection_success"] == 0
+    assert summary["eventual_connection_success"] == 1
+    assert summary["retry_count"] == 1
+    assert summary["failures_by_category"] == {"TimeoutError": 1}
+    assert "/org/bluez" not in json.dumps(summary)
+    assert summary["latencies"]["connection_latency_ms"] == {
+        "samples": 1, "median": 2500, "p95": 2500, "max": 2500,
+    }
+    assert summary["by_blind"]["left"]["latencies"]["cold_queue_ms"]["max"] == 300
+    assert summary["by_adapter"]["a"]["connection_attempts"] == 2
+    assert summary["groups"]["by_group"]["main"]["samples"] == 1
+    assert summary["slowest_by_stage"]["connection_latency_ms"][0]["blind_id"] == "left"
+    assert summary["slowest_by_stage"]["authentication_latency_ms"][0]["duration_ms"] == 100
+
+
+def test_loads_rotated_and_current_logs_then_filters_by_time(tmp_path: Path) -> None:
+    current = tmp_path / "metrics.jsonl"
+    rotated = tmp_path / "metrics.jsonl.1"
+    rotated.write_text(json.dumps({"event": "old", "recorded_at": 100}) + "\n")
+    current.write_text(json.dumps({"event": "new", "recorded_at": 200}) + "\n")
+    records = load_jsonl_files([current])
+    assert [row["event"] for row in records] == ["old", "new"]
+    assert [row["event"] for row in filter_records(records, since=150)] == ["new"]
+    assert [row["event"] for row in filter_records(records, until=150)] == ["old"]
+    assert parse_time_boundary("1970-01-01T00:01:40Z") == 100
+
+
+def test_mixed_legacy_and_stage_records_keep_old_sample_without_new_duplicates() -> None:
+    summary = summarize_operations([
+        {"event": "command_completed", "command_id": "legacy", "blind_id": "left",
+         "connect_ms": 1000, "outcome": "completed"},
+        {"event": "connection_attempt_succeeded", "command_id": "modern",
+         "blind_id": "right", "attempt": 1, "connect_ms": 2000},
+        {"event": "connection_ready", "command_id": "modern", "blind_id": "right",
+         "connect_ms": 2000, "gatt_setup_ms": 50},
+        {"event": "command_completed", "command_id": "modern", "blind_id": "right",
+         "connect_ms": 2000, "gatt_setup_ms": 50, "outcome": "completed"},
+    ])
+    timing = summary["latencies"]["connection_latency_ms"]
+    assert timing["samples"] == 2
+    assert timing["median"] == 1500

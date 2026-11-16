@@ -55,6 +55,107 @@ def test_lifecycle_reports_queued_then_running():
     asyncio.run(scenario())
 
 
+def test_dispatcher_telemetry_measures_queue_and_execution_time():
+    class BlockingBlind:
+        config = FakeConfig()
+
+        def __init__(self):
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def execute(self, command):
+            if command.id == "first":
+                self.first_started.set()
+                await self.release_first.wait()
+            return CommandResult(command.id, "blind", Outcome.COMPLETED)
+
+        async def close(self):
+            pass
+
+    async def scenario():
+        events = []
+        blind = BlockingBlind()
+        dispatcher = BlindDispatcher(
+            blind, telemetry=lambda event, fields: events.append((event, fields))
+        )
+        first = asyncio.create_task(dispatcher.submit(
+            BlindCommand("first", CommandKind.FULL_OPEN)
+        ))
+        await blind.first_started.wait()
+        second = asyncio.create_task(dispatcher.submit(
+            BlindCommand("second", CommandKind.FULL_CLOSE)
+        ))
+        await asyncio.sleep(0.02)
+        blind.release_first.set()
+        await asyncio.gather(first, second)
+
+        started = {
+            fields["command_id"]: fields
+            for event, fields in events if event == "dispatcher_command_started"
+        }
+        completed = {
+            fields["command_id"]: fields
+            for event, fields in events if event == "dispatcher_command_completed"
+        }
+        assert started["second"]["queue_wait_ms"] >= 15
+        assert completed["second"]["queue_wait_ms"] >= 15
+        assert completed["second"]["dispatcher_total_ms"] >= 15
+        assert completed["second"]["outcome"] == "completed"
+        assert completed["second"]["queue_depth_at_enqueue"] == 0
+        await dispatcher.close()
+
+    asyncio.run(scenario())
+
+
+def test_dispatcher_telemetry_records_queue_full_and_stop_supersession():
+    class BlockingBlind:
+        config = FakeConfig()
+
+        def __init__(self):
+            self.started = asyncio.Event()
+
+        async def execute(self, command):
+            if command.kind is not CommandKind.STOP:
+                self.started.set()
+                await asyncio.Event().wait()
+            return CommandResult(command.id, "blind", Outcome.COMPLETED)
+
+        async def close(self):
+            pass
+
+    async def scenario():
+        events = []
+        dispatcher = BlindDispatcher(
+            BlockingBlind(), max_queue=1,
+            telemetry=lambda event, fields: events.append((event, fields)),
+        )
+        moving = asyncio.create_task(dispatcher.submit(
+            BlindCommand("moving", CommandKind.FULL_OPEN)
+        ))
+        await dispatcher.blind.started.wait()
+        queued = asyncio.create_task(dispatcher.submit(
+            BlindCommand("queued", CommandKind.FULL_CLOSE)
+        ))
+        await asyncio.sleep(0)
+        try:
+            await dispatcher.submit(BlindCommand("overflow", CommandKind.FAVORITE))
+        except Exception as exc:
+            assert "queue full" in str(exc)
+        else:
+            raise AssertionError("overflow should be rejected")
+        await dispatcher.submit(BlindCommand("stop", CommandKind.STOP))
+        await asyncio.gather(moving, queued)
+
+        assert any(event == "dispatcher_queue_full" and fields["command_id"] == "overflow"
+                   for event, fields in events)
+        superseded = [fields for event, fields in events
+                      if event == "dispatcher_command_completed" and fields["superseded"]]
+        assert {item["command_id"] for item in superseded} == {"moving", "queued"}
+        await dispatcher.close()
+
+    asyncio.run(scenario())
+
+
 def test_stop_preempts_running_command_and_supersedes_queued_work():
     class BlockingBlind:
         config = FakeConfig()

@@ -6,13 +6,16 @@ import argparse
 import asyncio
 import hashlib
 import json
+import time
 from dataclasses import asdict
 
 from .diagnostics import (
     adapter_as_dict,
     adapter_preflight,
     discover_adapters,
-    load_jsonl,
+    filter_records,
+    load_jsonl_files,
+    parse_time_boundary,
     run_host_checks,
     select_adapter,
     summarize_operations,
@@ -37,7 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--seconds", type=float, default=12.0)
     scan.add_argument("--show-private", action="store_true", help="show advertised names and full addresses")
     report = commands.add_parser("report", help="summarize existing JSONL performance telemetry")
-    report.add_argument("jsonl")
+    report.add_argument("jsonl", nargs="+", help="current JSONL path(s); .1 rotations are included")
+    time_filter = report.add_mutually_exclusive_group()
+    time_filter.add_argument("--since", help="inclusive ISO-8601 or epoch start time")
+    time_filter.add_argument("--recent-days", type=float, help="include only the most recent N days")
+    report.add_argument("--until", help="inclusive ISO-8601 or epoch end time")
+    report.add_argument(
+        "--no-rotated", action="store_true", help="do not include adjacent .1 rotation files"
+    )
     return parser
 
 
@@ -94,7 +104,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(asyncio.run(_scan(args)), indent=2, sort_keys=True))
         return 0
     if args.command == "report":
-        print(json.dumps(summarize_operations(load_jsonl(args.jsonl)), indent=2, sort_keys=True))
+        if args.recent_days is not None and args.recent_days <= 0:
+            raise ValueError("--recent-days must be greater than zero")
+        since = (
+            time.time() - args.recent_days * 86400
+            if args.recent_days is not None
+            else parse_time_boundary(args.since) if args.since else None
+        )
+        until = parse_time_boundary(args.until) if args.until else None
+        records = load_jsonl_files(args.jsonl, include_rotated=not args.no_rotated)
+        print(json.dumps(
+            summarize_operations(filter_records(records, since=since, until=until)),
+            indent=2, sort_keys=True,
+        ))
         return 0
     raise AssertionError("unreachable")
 

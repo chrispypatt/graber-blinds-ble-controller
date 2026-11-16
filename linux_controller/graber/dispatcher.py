@@ -22,10 +22,14 @@ class _Queued:
     command: BlindCommand
     future: asyncio.Future[CommandResult]
     generation: int
+    queued_at: float
+    queue_depth_at_enqueue: int
+    started_at: float | None = None
 
 
 class BlindDispatcher:
-    def __init__(self, blind: BlindController, max_queue: int = 8, dedupe_size: int = 256):
+    def __init__(self, blind: BlindController, max_queue: int = 8, dedupe_size: int = 256,
+                 telemetry: Callable[[str, dict[str, object]], None] | None = None):
         self.blind = blind
         self._queue: asyncio.Queue[_Queued | None] = asyncio.Queue(max_queue)
         self._dedupe_size = dedupe_size
@@ -36,6 +40,7 @@ class BlindDispatcher:
         self._active_item: _Queued | None = None
         self._active_task: asyncio.Task[CommandResult] | None = None
         self._lifecycle_listener: Callable[[str, str, str], None] | None = None
+        self._telemetry = telemetry or (lambda _event, _fields: None)
 
     def set_lifecycle_listener(self, listener: Callable[[str, str, str], None]) -> None:
         self._lifecycle_listener = listener
@@ -52,8 +57,18 @@ class BlindDispatcher:
         async with self._state_lock:
             previous = self._results.get(command.id)
             if isinstance(previous, CommandResult):
+                self._telemetry("dispatcher_command_duplicate", {
+                    "blind_id": self.blind.config.id,
+                    "command_id": command.id,
+                    "duplicate_state": "completed",
+                })
                 return CommandResult(**{**previous.__dict__, "outcome": Outcome.DUPLICATE})
             if isinstance(previous, asyncio.Future):
+                self._telemetry("dispatcher_command_duplicate", {
+                    "blind_id": self.blind.config.id,
+                    "command_id": command.id,
+                    "duplicate_state": "in_flight",
+                })
                 future = previous
             else:
                 if not self._worker:
@@ -68,10 +83,26 @@ class BlindDispatcher:
                             self._active_task is not None):
                         self._active_task.cancel()
                 try:
-                    self._queue.put_nowait(_Queued(command, future, self._generation))
+                    depth = self._queue.qsize()
+                    item = _Queued(
+                        command, future, self._generation, time.monotonic(), depth,
+                    )
+                    self._queue.put_nowait(item)
+                    self._telemetry("dispatcher_command_queued", {
+                        "blind_id": self.blind.config.id,
+                        "command_id": command.id,
+                        "kind": command.kind.value,
+                        "queue_depth": depth + 1,
+                    })
                     self._notify_lifecycle("queued", command.id)
                 except asyncio.QueueFull:
                     self._results.pop(command.id, None)
+                    self._telemetry("dispatcher_queue_full", {
+                        "blind_id": self.blind.config.id,
+                        "command_id": command.id,
+                        "kind": command.kind.value,
+                        "queue_depth": self._queue.qsize(),
+                    })
                     raise QueueFull(f"queue full for {self.blind.config.id}")
         return await asyncio.shield(future)
 
@@ -83,6 +114,26 @@ class BlindDispatcher:
         )
 
     def _store_result_locked(self, item: _Queued, result: CommandResult) -> None:
+        now = time.monotonic()
+        queue_wait_ms = (
+            ((item.started_at or now) - item.queued_at) * 1000
+        )
+        self._telemetry("dispatcher_command_completed", {
+            "blind_id": self.blind.config.id,
+            "command_id": item.command.id,
+            "kind": item.command.kind.value,
+            "outcome": result.outcome.value,
+            "queue_wait_ms": max(0.0, queue_wait_ms),
+            "execution_ms": (
+                max(0.0, (now - item.started_at) * 1000)
+                if item.started_at is not None else 0.0
+            ),
+            "dispatcher_total_ms": max(0.0, (now - item.queued_at) * 1000),
+            "queue_depth_at_enqueue": item.queue_depth_at_enqueue,
+            "superseded": bool(
+                result.error and result.error.startswith("superseded by stop command")
+            ),
+        })
         self._results[item.command.id] = result
         self._results.move_to_end(item.command.id)
         while len(self._results) > self._dedupe_size:
@@ -111,6 +162,16 @@ class BlindDispatcher:
                         result = self._superseded_result(item, "newer-stop")
                     else:
                         self._active_item = item
+                        item.started_at = time.monotonic()
+                        self._telemetry("dispatcher_command_started", {
+                            "blind_id": self.blind.config.id,
+                            "command_id": item.command.id,
+                            "kind": item.command.kind.value,
+                            "queue_wait_ms": max(
+                                0.0, (item.started_at - item.queued_at) * 1000
+                            ),
+                            "queue_depth_at_enqueue": item.queue_depth_at_enqueue,
+                        })
                         self._notify_lifecycle("running", item.command.id)
                         self._active_task = asyncio.create_task(
                             self.blind.execute(item.command),

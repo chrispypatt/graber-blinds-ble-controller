@@ -108,6 +108,21 @@ Do not include access codes or raw private addresses. Generate an offline report
   /var/lib/graber-controller/metrics.jsonl
 ```
 
+The report automatically includes the adjacent `metrics.jsonl.1` rotation and
+uses all available records by default. Limit an investigation without changing
+collection:
+
+```sh
+# Most recent three days
+/opt/graber-controller/.venv/bin/python -m graber.diagnostic_cli report \
+  /var/lib/graber-controller/metrics.jsonl --recent-days 3
+
+# Inclusive UTC/ISO time range
+/opt/graber-controller/.venv/bin/python -m graber.diagnostic_cli report \
+  /var/lib/graber-controller/metrics.jsonl \
+  --since 2026-11-16T00:00:00Z --until 2026-11-17T00:00:00Z
+```
+
 Compare first-attempt connection success, eventual command success, median/p95
 connection and movement-start latency, retries, timeouts, adapter recovery, and
 group outcome. A GATT-write success rate is reported separately and cannot stand
@@ -115,9 +130,13 @@ in for movement success. Establish a comparable official-app observation as the
 deployment-local reference. The stated 3-second/95%/99% goals remain targets,
 not claims.
 
-Keep the metrics file bounded/rotated and use aggregate reports for long-term
-history to protect microSD storage. The example caps the active JSONL file at
-2 MB and keeps one previous file.
+Collection is continuous and has no fixed reporting schedule. Reports include
+daily counts, per-blind and per-adapter success, median/p95/max stage timing,
+failure categories, group movement spread, and the three slowest records for
+each stage so long feedback durations cannot hide a slow connection or queue.
+Keep the metrics file bounded/rotated to protect microSD storage. The example
+caps the active JSONL file at 2 MB and keeps one previous file; older detailed
+records roll off automatically.
 
 ## Home Assistant cutover
 

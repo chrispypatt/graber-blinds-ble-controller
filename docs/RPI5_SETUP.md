@@ -93,6 +93,26 @@ progress, and adapter health. A movement command progresses through bounded
 states such as queued, running, awaiting feedback, and a terminal result. A
 write acknowledged by the motor is not treated as proof that it moved.
 
+### Continuous performance metrics
+
+When `metrics_path` is configured, the controller continuously records a
+bounded JSONL trace of command queuing, adapter admission, discovery, connect,
+GATT setup, authentication, writes, feedback, retries, group spread, and
+disconnect cleanup. It excludes access codes, protocol payloads, and raw
+controller addresses. The active file rotates to one `.1` backup at
+`metrics_max_bytes`, limiting microSD use.
+
+Review all retained data at any time:
+
+```sh
+/opt/graber-controller/.venv/bin/python -m graber.diagnostic_cli report \
+  /var/lib/graber-controller/metrics.jsonl
+```
+
+The report highlights per-stage outliers and compares blinds and adapters.
+Optional `--recent-days`, `--since`, and `--until` filters narrow the report
+without pausing or resetting collection.
+
 ### Adapter recovery check
 
 Adapters are resolved from their configured controller address and USB path,

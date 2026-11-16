@@ -93,8 +93,12 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
         blind = BlindController(blind_config, manager, transport, config.retry,
                                 config.warm_connection_s, telemetry=service_telemetry,
                                 state_listener=state_changed)
-        dispatchers[blind_config.id] = BlindDispatcher(blind)
-    controller = Controller(dispatchers, config.groups, manager.health)
+        dispatchers[blind_config.id] = BlindDispatcher(
+            blind, telemetry=service_telemetry
+        )
+    controller = Controller(
+        dispatchers, config.groups, manager.health, telemetry=service_telemetry
+    )
     controller_ref["controller"] = controller
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
