@@ -18,9 +18,10 @@ stable external-adapter identity/failover, group control, MQTT Discovery entitie
 a password-protected LAN UI, and read-only identification/reliability tooling.
 
 No real motor address, access code, password, or Home Assistant identity belongs
-in this repository. The installer stores only a salted password hash for portal
-login; the internal controller token is never sent to the browser. Automated
-tests never require Bluetooth hardware or move a shade.
+in this repository. The installer stores salted password hashes for a permanent
+recovery administrator and a separate everyday account; the internal controller
+token is never sent to the browser. Automated tests never require Bluetooth
+hardware or move a shade.
 
 ## Start here
 
@@ -37,9 +38,10 @@ Then read the [architecture audit](docs/ARCHITECTURE_AUDIT.md),
 
 ## Identification and setup
 
-Install the service, retrieve the one-time initial password, and open the web
-wizard. It scans, identifies, names, groups, and saves shades, then switches the
-same address to the control page. See the [Pi setup guide](docs/RPI5_SETUP.md).
+Install the service, retrieve the private recovery key, and open the web wizard.
+The first administrator login creates a separate everyday account. The wizard
+then scans, identifies, names, groups, and saves shades before switching the same
+address to the control page. See the [Pi setup guide](docs/RPI5_SETUP.md).
 
 Command-line adapter, inventory, and performance tools remain available for
 diagnostics. Their normal output redacts motor identities; private captures are

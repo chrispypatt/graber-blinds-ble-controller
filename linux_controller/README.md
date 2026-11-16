@@ -22,6 +22,6 @@ The service reads `GRABER_CONFIG` and `GRABER_SECRETS`, defaulting to files in
 `/etc/graber-controller`. The secrets file must have mode `0600`.
 
 The public portal owns browser authentication and proxies to loopback-only setup
-or control children. Password records contain a salted hash only. For HTTPS,
-place a trusted reverse proxy in front of the loopback-bound portal; see
-`../docs/RPI5_SETUP.md`.
+or control children. Password records contain salted hashes for a recovery
+administrator and a separate everyday owner account. For HTTPS, place a trusted
+reverse proxy in front of the loopback-bound portal; see `../docs/RPI5_SETUP.md`.

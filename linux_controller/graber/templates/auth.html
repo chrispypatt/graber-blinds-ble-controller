@@ -16,12 +16,13 @@
       <p class="form-error" id="loginError" role="alert"></p>
       <button class="button primary wide" id="loginButton" type="submit">Sign in</button>
     </form>
-    <form class="auth-card is-hidden" id="initialPasswordForm">
-      <h1>Set a password</h1>
-      <label class="field"><span>New password</span><input id="initialPassword" type="password" autocomplete="new-password" minlength="12" required></label>
-      <label class="field"><span>Confirm password</span><input id="initialPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
-      <p class="form-error" id="initialPasswordError" role="alert"></p>
-      <button class="button primary wide" id="initialPasswordButton" type="submit">Save password</button>
+    <form class="auth-card is-hidden" id="accountSetupForm">
+      <h1>Create your account</h1>
+      <label class="field"><span>Username</span><input id="accountUsername" autocomplete="username" required></label>
+      <label class="field"><span>Password</span><input id="accountPassword" type="password" autocomplete="new-password" minlength="12" required></label>
+      <label class="field"><span>Confirm password</span><input id="accountPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
+      <p class="form-error" id="accountSetupError" role="alert"></p>
+      <button class="button primary wide" id="accountSetupButton" type="submit">Create account</button>
     </form>
   </main>
   <script src="/assets/auth.js" defer></script>

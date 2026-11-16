@@ -82,7 +82,7 @@ echo "Plan:"
 echo "  install BlueZ, Python venv support, and Bluetooth inspection utilities"
 echo "  install controller source at $install_dir"
 echo "  preserve any existing $config_dir/config.toml and secrets.toml"
-echo "  create or preserve private portal authentication and internal key"
+echo "  create or preserve portal owner/recovery authentication and internal key"
 echo "  install $service_file"
 if [ "$enable" = true ]; then
   echo "  enable/start $service_name in setup or control mode"
@@ -159,11 +159,17 @@ fi
 chown graber:graber "$token_file"
 chmod 0600 "$token_file"
 
-if [ ! -f "$auth_file" ]; then
-  sudo -u graber env PYTHONPATH="$install_dir" "$install_dir/.venv/bin/python" \
-    -m graber.auth init --file "$auth_file" \
-    --initial-password-file "$token_file" --username admin
+if [ -L "$auth_file" ]; then
+  echo "Refusing symlinked portal authentication file: $auth_file" >&2
+  exit 1
 fi
+if [ -f "$auth_file" ]; then
+  chown graber:graber "$auth_file"
+  chmod 0600 "$auth_file"
+fi
+sudo -u graber env PYTHONPATH="$install_dir" "$install_dir/.venv/bin/python" \
+  -m graber.auth init --file "$auth_file" \
+  --initial-password-file "$token_file" --username admin
 chown graber:graber "$auth_file"
 chmod 0600 "$auth_file"
 

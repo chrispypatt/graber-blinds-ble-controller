@@ -9,17 +9,25 @@ from graber.portal import ModeSupervisor, create_app, is_command_request
 
 
 PASSWORD = "correct horse battery staple"
+RECOVERY_PASSWORD = "0123456789abcdef0123456789abcdef"
 
 
-def make_auth(tmp_path: Path, *, must_change=False) -> AuthManager:
+def make_auth(tmp_path: Path, *, setup_required=False) -> AuthManager:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    token = tmp_path / "setup-token"
+    token.write_text(RECOVERY_PASSWORD, encoding="utf-8")
+    token.chmod(0o600)
     store = PasswordStore(tmp_path / "auth.json")
-    store.set_password("admin", PASSWORD, must_change_password=must_change)
+    store.initialize("admin", token)
+    if not setup_required:
+        store.set_owner("owner", PASSWORD)
     return AuthManager(store, secure_cookie=False)
 
 
-async def login(client: TestClient, password: str = PASSWORD) -> dict:
+async def login(client: TestClient, password: str = PASSWORD,
+                username: str = "owner") -> dict:
     response = await client.post(
-        "/api/auth/login", json={"username": "admin", "password": password}
+        "/api/auth/login", json={"username": username, "password": password}
     )
     assert response.status == 200
     return await response.json()
@@ -232,7 +240,7 @@ def test_login_cookie_is_httponly_strict_and_secure_when_configured(tmp_path):
         await client.start_server()
         try:
             response = await client.post(
-                "/api/auth/login", json={"username": "admin", "password": PASSWORD}
+                "/api/auth/login", json={"username": "admin", "password": RECOVERY_PASSWORD}
             )
             cookie = response.cookies[manager.cookie_name]
             assert cookie["httponly"] is True
@@ -258,7 +266,7 @@ def test_login_is_rate_limited_per_effective_client(tmp_path):
                 )
                 assert denied.status == 401
             limited = await client.post(
-                "/api/auth/login", json={"username": "admin", "password": PASSWORD}
+                "/api/auth/login", json={"username": "admin", "password": RECOVERY_PASSWORD}
             )
             assert limited.status == 429
             assert int(limited.headers["Retry-After"]) > 0
@@ -320,29 +328,122 @@ def test_csrf_is_required_and_logout_invalidates_session(tmp_path):
     asyncio.run(scenario())
 
 
-def test_must_change_password_blocks_proxy_until_changed(tmp_path):
+def test_fresh_admin_creates_owner_before_proxy_access(tmp_path):
     async def scenario():
-        manager = make_auth(tmp_path, must_change=True)
+        manager = make_auth(tmp_path, setup_required=True)
         client = TestClient(TestServer(create_app(
             StaticSupervisor(), allowed_networks=("127.0.0.0/8",),
             auth_manager=manager,
         )))
         await client.start_server()
         try:
-            auth = await login(client)
-            assert auth["must_change_password"] is True
+            auth = await login(client, RECOVERY_PASSWORD, "admin")
+            assert auth["role"] == "recovery"
+            assert auth["setup_required"] is True
             blocked = await client.get("/api/state")
             assert blocked.status == 403
-            changed = await client.post(
-                "/api/auth/password",
-                json={"new_password": "a different secure password"},
+            created = await client.post(
+                "/api/auth/account",
+                json={"username": "chris", "password": PASSWORD},
                 headers={"X-CSRF-Token": auth["csrf_token"]},
             )
-            assert changed.status == 200
-            assert (await changed.json())["must_change_password"] is False
+            assert created.status == 200
+            created_body = await created.json()
+            assert created_body["username"] == "chris"
+            assert created_body["role"] == "owner"
+            assert created_body["setup_required"] is False
             session = await client.get("/api/auth/session")
             assert session.status == 200
-            assert (await session.json())["must_change_password"] is False
+            assert (await session.json())["setup_required"] is False
+            recovery = await client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": RECOVERY_PASSWORD},
+            )
+            assert recovery.status == 200
+        finally:
+            await client.close()
+    asyncio.run(scenario())
+
+
+def test_admin_can_replace_owner_but_owner_cannot_use_account_endpoint(tmp_path):
+    async def scenario():
+        manager = make_auth(tmp_path)
+        client = TestClient(TestServer(create_app(
+            StaticSupervisor(), allowed_networks=("127.0.0.0/8",),
+            auth_manager=manager,
+        )))
+        await client.start_server()
+        try:
+            owner = await login(client)
+            rejected = await client.post(
+                "/api/auth/account",
+                json={"username": "other", "password": "replacement secure password"},
+                headers={"X-CSRF-Token": owner["csrf_token"]},
+            )
+            assert rejected.status == 400
+            admin = await login(client, RECOVERY_PASSWORD, "admin")
+            reserved = await client.post(
+                "/api/auth/account",
+                json={"username": "AdMiN", "password": "replacement secure password"},
+                headers={"X-CSRF-Token": admin["csrf_token"]},
+            )
+            assert reserved.status == 400
+            replaced = await client.post(
+                "/api/auth/account",
+                json={"username": "other", "password": "replacement secure password"},
+                headers={"X-CSRF-Token": admin["csrf_token"]},
+            )
+            assert replaced.status == 200
+            assert (await replaced.json())["username"] == "other"
+            recovery = await client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": RECOVERY_PASSWORD},
+            )
+            assert recovery.status == 200
+        finally:
+            await client.close()
+    asyncio.run(scenario())
+
+
+def test_owner_changes_own_password_but_admin_cannot_change_recovery_in_browser(tmp_path):
+    async def scenario():
+        manager = make_auth(tmp_path)
+        client = TestClient(TestServer(create_app(
+            StaticSupervisor(), allowed_networks=("127.0.0.0/8",),
+            auth_manager=manager,
+        )))
+        await client.start_server()
+        try:
+            owner = await login(client)
+            changed = await client.post(
+                "/api/auth/password",
+                json={
+                    "current_password": PASSWORD,
+                    "new_password": "a different secure password",
+                },
+                headers={"X-CSRF-Token": owner["csrf_token"]},
+            )
+            assert changed.status == 200
+            assert (await changed.json())["role"] == "owner"
+            assert (await client.post(
+                "/api/auth/login",
+                json={"username": "owner", "password": "a different secure password"},
+            )).status == 200
+
+            admin = await login(client, RECOVERY_PASSWORD, "admin")
+            rejected = await client.post(
+                "/api/auth/password",
+                json={
+                    "current_password": RECOVERY_PASSWORD,
+                    "new_password": "browser must not rotate recovery",
+                },
+                headers={"X-CSRF-Token": admin["csrf_token"]},
+            )
+            assert rejected.status == 400
+            assert (await client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": RECOVERY_PASSWORD},
+            )).status == 200
         finally:
             await client.close()
     asyncio.run(scenario())

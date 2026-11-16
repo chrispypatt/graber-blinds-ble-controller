@@ -3,7 +3,7 @@
 const form=document.querySelector('#loginForm');
 const error=document.querySelector('#loginError');
 const button=document.querySelector('#loginButton');
-const initialForm=document.querySelector('#initialPasswordForm');
+const accountSetupForm=document.querySelector('#accountSetupForm');
 let csrfToken='';
 
 form.addEventListener('submit',async event=>{
@@ -24,11 +24,11 @@ form.addEventListener('submit',async event=>{
     let body={};
     try{body=text?JSON.parse(text):{}}catch{body={}}
     if(!response.ok)throw new Error(body.error||'Sign in failed.');
-    if(body.must_change_password){
+    if(body.role==='recovery'&&body.setup_required){
       csrfToken=body.csrf_token;
       form.classList.add('is-hidden');
-      initialForm.classList.remove('is-hidden');
-      document.querySelector('#initialPassword').focus();
+      accountSetupForm.classList.remove('is-hidden');
+      document.querySelector('#accountUsername').focus();
       return;
     }
     window.location.replace('/');
@@ -39,30 +39,31 @@ form.addEventListener('submit',async event=>{
   }
 });
 
-initialForm.addEventListener('submit',async event=>{
+accountSetupForm.addEventListener('submit',async event=>{
   event.preventDefault();
-  const password=document.querySelector('#initialPassword').value;
-  const confirmation=document.querySelector('#initialPasswordConfirm').value;
-  const initialError=document.querySelector('#initialPasswordError');
-  const initialButton=document.querySelector('#initialPasswordButton');
-  initialError.textContent='';
-  if(password!==confirmation){initialError.textContent='Passwords do not match.';return}
-  initialButton.disabled=true;
-  initialButton.textContent='Saving…';
+  const username=document.querySelector('#accountUsername').value.trim();
+  const password=document.querySelector('#accountPassword').value;
+  const confirmation=document.querySelector('#accountPasswordConfirm').value;
+  const accountError=document.querySelector('#accountSetupError');
+  const accountButton=document.querySelector('#accountSetupButton');
+  accountError.textContent='';
+  if(password!==confirmation){accountError.textContent='Passwords do not match.';return}
+  accountButton.disabled=true;
+  accountButton.textContent='Creating…';
   try{
-    const response=await fetch('/api/auth/password',{
+    const response=await fetch('/api/auth/account',{
       method:'POST',
       headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},
-      body:JSON.stringify({new_password:password}),
+      body:JSON.stringify({username,password}),
     });
     const text=await response.text();
     let body={};
     try{body=text?JSON.parse(text):{}}catch{body={}}
-    if(!response.ok)throw new Error(body.error||'Password change failed.');
+    if(!response.ok)throw new Error(body.error||'Account creation failed.');
     window.location.replace('/');
   }catch(reason){
-    initialError.textContent=reason.message;
-    initialButton.disabled=false;
-    initialButton.textContent='Save password';
+    accountError.textContent=reason.message;
+    accountButton.disabled=false;
+    accountButton.textContent='Create account';
   }
 });

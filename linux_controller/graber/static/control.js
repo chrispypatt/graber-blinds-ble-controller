@@ -3,7 +3,7 @@
 const $=selector=>document.querySelector(selector);
 const $$=selector=>[...document.querySelectorAll(selector)];
 let state={blinds:{},groups:{},adapters:{},_web:{}};
-let authSession={authenticated:false,csrf_token:'',username:''};
+let authSession={authenticated:false,csrf_token:'',username:'',role:'owner',setup_required:false};
 const pending=new Set();
 const activeRequests=new Map();
 const sliderDrafts=new Map();
@@ -22,7 +22,7 @@ function movementPending(targetType,id){
 }
 function requireAuth(response){if(response.status===401){window.location.replace('/login');throw new Error('Session expired.')}return response}
 function csrfHeaders(){return{'X-CSRF-Token':authSession.csrf_token}}
-async function loadAuthSession(){const response=requireAuth(await fetch('/api/auth/session'));if(!response.ok)throw new Error('Authentication unavailable');authSession=await response.json();if(authSession.must_change_password)window.location.replace('/login')}
+async function loadAuthSession(){const response=requireAuth(await fetch('/api/auth/session'));if(!response.ok)throw new Error('Authentication unavailable');authSession=await response.json();if(authSession.setup_required)window.location.replace('/login')}
 async function getState(){const response=requireAuth(await fetch('/api/state'));if(!response.ok)throw new Error('Controller unavailable');return response.json()}
 
 async function command(id,action,position=null,targetType='blind'){
@@ -141,15 +141,17 @@ function renderBlinds(){
 }
 
 async function refresh(){if(document.activeElement?.type==='range')return;try{state=await getState();render()}catch(error){$('#controllerStatus').className='status-pill error';$('#controllerStatus').innerHTML='<i></i>Controller unavailable'}}
-function openAccount(){$('#accountName').textContent=authSession.username;$('#accountError').textContent='';$('#passwordForm').reset();$('#accountModal').classList.remove('is-hidden');$('#currentPassword').focus()}
+function openAccount(){const recovery=authSession.role==='recovery';$('#accountName').textContent=recovery?`${authSession.username} · Recovery`:authSession.username;$('#passwordError').textContent='';$('#ownerAccountError').textContent='';$('#passwordForm').reset();$('#ownerAccountForm').reset();$('#passwordForm').classList.toggle('is-hidden',recovery);$('#ownerAccountForm').classList.toggle('is-hidden',!recovery);$('#accountModal').classList.remove('is-hidden');$(recovery?'#ownerUsername':'#currentPassword').focus()}
 function closeAccount(){$('#accountModal').classList.add('is-hidden')}
 async function editSetup(){const button=$('#setupButton');button.disabled=true;button.textContent='Opening…';try{const response=requireAuth(await fetch('/api/portal/setup',{method:'POST',headers:csrfHeaders()}));const text=await response.text();if(!response.ok)throw new Error(text||'Setup is unavailable');window.location.replace('/')}catch(error){toast(error.message,'error',6000);button.disabled=false;button.textContent='Edit setup'}}
-async function changePassword(event){event.preventDefault();const current=$('#currentPassword').value,newPassword=$('#newPassword').value,confirmation=$('#confirmPassword').value,error=$('#accountError');error.textContent='';if(newPassword!==confirmation){error.textContent='Passwords do not match.';return}const button=event.submitter;button.disabled=true;try{const response=requireAuth(await fetch('/api/auth/password',{method:'POST',headers:{'Content-Type':'application/json',...csrfHeaders()},body:JSON.stringify({current_password:current,new_password:newPassword})}));const body=await response.json();if(!response.ok)throw new Error(body.error||'Password change failed.');if(body.csrf_token)authSession=body;closeAccount();toast('Password changed.')}catch(reason){error.textContent=reason.message}finally{button.disabled=false}}
+async function changePassword(event){event.preventDefault();const current=$('#currentPassword').value,newPassword=$('#newPassword').value,confirmation=$('#confirmPassword').value,error=$('#passwordError');error.textContent='';if(newPassword!==confirmation){error.textContent='Passwords do not match.';return}const button=event.submitter;button.disabled=true;try{const response=requireAuth(await fetch('/api/auth/password',{method:'POST',headers:{'Content-Type':'application/json',...csrfHeaders()},body:JSON.stringify({current_password:current,new_password:newPassword})}));const body=await response.json();if(!response.ok)throw new Error(body.error||'Password change failed.');if(body.csrf_token)authSession=body;closeAccount();toast('Password changed.')}catch(reason){error.textContent=reason.message}finally{button.disabled=false}}
+async function saveOwner(event){event.preventDefault();const username=$('#ownerUsername').value.trim(),password=$('#ownerPassword').value,confirmation=$('#ownerPasswordConfirm').value,error=$('#ownerAccountError');error.textContent='';if(password!==confirmation){error.textContent='Passwords do not match.';return}const button=event.submitter;button.disabled=true;try{const response=requireAuth(await fetch('/api/auth/account',{method:'POST',headers:{'Content-Type':'application/json',...csrfHeaders()},body:JSON.stringify({username,password})}));const body=await response.json();if(!response.ok)throw new Error(body.error||'Owner update failed.');if(body.csrf_token)authSession=body;closeAccount();toast('Owner saved.')}catch(reason){error.textContent=reason.message}finally{button.disabled=false}}
 async function logout(){const button=$('#logoutButton');button.disabled=true;try{await fetch('/api/auth/logout',{method:'POST',headers:csrfHeaders()})}finally{window.location.replace('/login')}}
 
 $('#setupButton').addEventListener('click',editSetup);
 $('#accountButton').addEventListener('click',openAccount);
 $('#passwordForm').addEventListener('submit',changePassword);
+$('#ownerAccountForm').addEventListener('submit',saveOwner);
 $('#logoutButton').addEventListener('click',logout);
 $$('[data-close-modal]').forEach(button=>button.addEventListener('click',closeAccount));
 $('#blindSearch').addEventListener('input',renderBlinds);

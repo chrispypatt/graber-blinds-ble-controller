@@ -41,22 +41,24 @@ Set `GRABER_INSTALL_DIR`, `GRABER_CONFIG_DIR`, `GRABER_STATE_DIR`,
 `GRABER_SERVICE_NAME`, `GRABER_PORTAL_HOST`, `GRABER_PORTAL_PORT`, or
 `GRABER_ALLOWED_NETWORKS` before both installer commands to override them.
 
-The installer creates the unprivileged `graber` service account, a hashed portal
-login, host settings, and the systemd service. Existing private files are
-preserved. When no saved controller configuration exists, the service starts in
-setup mode.
+The installer creates the unprivileged `graber` service account, a hashed
+recovery administrator, host settings, and the systemd service. Existing private
+files are preserved. When no saved controller configuration exists, the service
+starts in setup mode.
 
 ## Open setup
 
-The existing private setup key is the one-time initial password:
+The existing private setup key is the permanent `admin` recovery password:
 
 ```sh
 sudo cat /var/lib/graber-controller/setup-token
 ```
 
 Open `http://PI_ADDRESS:8080` from the trusted local network, sign in as `admin`,
-and enter that initial password. The portal immediately requires a new password
-and stores only its salted hash. Do not port-forward this page.
+and enter that recovery password. The first login requires a separate everyday
+account with a username and password you choose. Sign in with that account for
+normal setup and control. Reserve `admin` for account recovery. Do not
+port-forward this page.
 
 In the wizard:
 
@@ -91,17 +93,32 @@ progress, and adapter health. A movement command progresses through bounded
 states such as queued, running, awaiting feedback, and a terminal result. A
 write acknowledged by the motor is not treated as proof that it moved.
 
-### Change or reset the portal password
+### Accounts and recovery
 
-The portal provides an authenticated password-change screen. For an offline
-reset, stop the service and run the password tool interactively so the password
-never appears in shell history:
+The everyday account can change its own password. If it is inaccessible, sign
+in as `admin` with the recovery password and reset the everyday account. The
+recovery password always remains valid unless it is explicitly rotated with the
+offline tool.
+
+Stop the service before an offline recovery-password rotation. The tool prompts
+interactively so the new password never appears in shell history:
 
 ```sh
 sudo systemctl stop graber-controller
 sudo -u graber env PYTHONPATH=/opt/graber-controller \
-  /opt/graber-controller/.venv/bin/python -m graber.auth set-password \
-  --file /var/lib/graber-controller/portal/auth.json --username admin
+  /opt/graber-controller/.venv/bin/python -m graber.auth set-recovery-password \
+  --file /var/lib/graber-controller/portal/auth.json
+sudo systemctl start graber-controller
+```
+
+To remove an inaccessible everyday account from the console instead, use
+the offline reset command, then sign in as `admin` to create its replacement:
+
+```sh
+sudo systemctl stop graber-controller
+sudo -u graber env PYTHONPATH=/opt/graber-controller \
+  /opt/graber-controller/.venv/bin/python -m graber.auth reset-owner \
+  --file /var/lib/graber-controller/portal/auth.json
 sudo systemctl start graber-controller
 ```
 
@@ -173,5 +190,7 @@ sudo systemctl disable --now graber-controller
 ```
 
 Rollback does not require re-pairing shades. Keep an encrypted backup of
-`config.toml`, `secrets.toml`, and `portal/auth.json` outside the microSD card.
-The session cookie is memory-only and is not part of a backup.
+`config.toml`, `secrets.toml`, `portal/auth.json`, and the private `setup-token`
+outside the microSD card. The setup token is the recovery password: anyone with
+it has administrative portal access. The session cookie is memory-only and is
+not part of a backup.

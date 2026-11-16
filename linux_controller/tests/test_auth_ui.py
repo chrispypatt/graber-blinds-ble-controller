@@ -24,13 +24,16 @@ def test_login_and_account_forms_use_password_manager_metadata():
     control = (PACKAGE / "templates" / "index.html").read_text(encoding="utf-8")
     setup = (PACKAGE / "templates" / "identify.html").read_text(encoding="utf-8")
 
-    assert 'autocomplete="username"' in login
+    assert login.count('autocomplete="username"') == 2
     assert 'autocomplete="current-password"' in login
-    assert 'autocomplete="new-password"' in login
+    assert login.count('autocomplete="new-password"') == 2
+    assert 'id="accountSetupForm"' in login
     for page in (control, setup):
         assert 'id="accountButton"' in page
         assert 'autocomplete="current-password"' in page
-        assert page.count('autocomplete="new-password"') == 2
+        assert 'id="ownerAccountForm"' in page
+        assert page.count('autocomplete="username"') == 1
+        assert page.count('autocomplete="new-password"') == 4
 
 
 def test_mutating_ui_requests_send_csrf_header():
@@ -43,3 +46,19 @@ def test_mutating_ui_requests_send_csrf_header():
     assert "X-CSRF-Token" in combined
     assert "/api/auth/logout" in combined
     assert "/api/auth/password" in combined
+    assert "/api/auth/account" in combined
+
+
+def test_recovery_role_creates_or_resets_owner_without_changing_admin_password():
+    auth = (PACKAGE / "static" / "auth.js").read_text(encoding="utf-8")
+    control = (PACKAGE / "static" / "control.js").read_text(encoding="utf-8")
+    setup = (PACKAGE / "static" / "setup.js").read_text(encoding="utf-8")
+
+    assert "body.role==='recovery'&&body.setup_required" in auth
+    assert "Create your account" in (
+        PACKAGE / "templates" / "auth.html"
+    ).read_text(encoding="utf-8")
+    for source in (control, setup):
+        assert "authSession.role==='recovery'" in source
+        assert "ownerAccountForm" in source
+        assert "current_password" in source

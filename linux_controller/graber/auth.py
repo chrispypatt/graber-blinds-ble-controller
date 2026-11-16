@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import stat
 import tempfile
@@ -91,70 +92,41 @@ def _derive(password: str, salt: bytes, *, n: int, r: int, p: int, length: int) 
 
 
 class PasswordStore:
-    """Atomic mode-0600 scrypt verifier storage for one administrator."""
+    """Atomic versioned storage for recovery and everyday credentials."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._lock = threading.RLock()
 
     @property
     def configured(self) -> bool:
         return self.path.is_file() and not self.path.is_symlink()
 
-    def set_password(self, username: str, password: str, *, must_change_password: bool = False) -> None:
+    @staticmethod
+    def _validate_username(username: str, *, allow_admin: bool = False) -> str:
         username = username.strip()
-        if not username or len(username) > 64:
-            raise AuthError("username must contain from 1 through 64 characters")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", username):
+            raise AuthError("username must use letters, numbers, dots, dashes, or underscores")
+        if not allow_admin and username.casefold() == "admin":
+            raise AuthError("username admin is reserved for recovery")
+        return username
+
+    @staticmethod
+    def _credential(username: str, password: str) -> dict[str, object]:
         validate_password(password)
         salt = secrets.token_bytes(16)
         verifier = _derive(password, salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, length=SCRYPT_DKLEN)
-        record = {
-            "version": 1, "algorithm": "scrypt", "username": username,
+        return {
+            "username": username,
             "n": SCRYPT_N, "r": SCRYPT_R, "p": SCRYPT_P, "dklen": SCRYPT_DKLEN,
             "salt": _b64encode(salt), "verifier": _b64encode(verifier),
-            "must_change_password": bool(must_change_password),
         }
-        _atomic_private_write(
-            self.path, json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-        )
 
-    def initialize(self, username: str, initial_password_file: str | Path) -> bool:
-        """Hash an existing private setup key once; never print or copy it."""
-        if self.configured:
-            _validate_private_file(self.path)
-            self._record()
-            return False
-        source = Path(initial_password_file)
-        _validate_private_file(source)
-        password = source.read_text(encoding="utf-8").strip()
-        self.set_password(username, password, must_change_password=True)
-        return True
-
-    def _record(self) -> dict[str, object]:
-        _validate_private_file(self.path)
-        try:
-            record = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise AuthError(f"invalid password file: {self.path}") from exc
-        required = {
-            "version", "algorithm", "username", "n", "r", "p", "dklen",
-            "salt", "verifier", "must_change_password",
-        }
+    @staticmethod
+    def _validate_credential(record: object) -> dict[str, object]:
+        required = {"username", "n", "r", "p", "dklen", "salt", "verifier"}
         if not isinstance(record, dict) or not required <= record.keys():
-            raise AuthError(f"invalid password file: {self.path}")
-        if record["version"] != 1 or record["algorithm"] != "scrypt":
-            raise AuthError("unsupported password verifier")
-        return record
-
-    @property
-    def must_change_password(self) -> bool:
-        return bool(self._record()["must_change_password"])
-
-    def verify(self, username: str, password: str) -> bool:
-        if not self.configured:
-            return False
-        if not 1 <= len(username) <= 64 or not 1 <= len(password) <= MAXIMUM_PASSWORD_LENGTH:
-            return False
-        record = self._record()
+            raise AuthError("invalid credential record")
         try:
             n, r, p, length = (int(record[key]) for key in ("n", "r", "p", "dklen"))
             memory_bytes = 128 * n * r
@@ -172,20 +144,162 @@ class PasswordStore:
             if len(salt) < 16 or len(expected) != length:
                 raise ValueError
         except (TypeError, ValueError, binascii.Error) as exc:
-            raise AuthError(f"invalid password file: {self.path}") from exc
-        actual = _derive(password, salt, n=n, r=r, p=p, length=length)
+            raise AuthError("invalid credential record") from exc
+        return record
+
+    @staticmethod
+    def _verify_credential(record: dict[str, object], username: str, password: str) -> bool:
+        record = PasswordStore._validate_credential(record)
+        actual = _derive(
+            password, _b64decode(str(record["salt"])), n=int(record["n"]),
+            r=int(record["r"]), p=int(record["p"]), length=int(record["dklen"]),
+        )
+        expected = _b64decode(str(record["verifier"]))
         username_ok = hmac.compare_digest(
-            username.encode("utf-8"), str(record["username"]).encode("utf-8")
+            username.casefold().encode("utf-8"), str(record["username"]).casefold().encode("utf-8")
         )
         return username_ok and hmac.compare_digest(actual, expected)
+
+    def _write(self, record: dict[str, object]) -> None:
+        _atomic_private_write(
+            self.path, json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+
+    def initialize(self, username: str, initial_password_file: str | Path) -> bool:
+        """Ensure v2 recovery auth, migrating v1 without storing plaintext."""
+        if username.casefold() != "admin":
+            raise AuthError("the recovery username must be admin")
+        source = Path(initial_password_file)
+        _validate_private_file(source)
+        password = source.read_text(encoding="utf-8").strip()
+        validate_password(password)
+        with self._lock:
+            if not self.configured:
+                self._write({
+                    "version": 2, "algorithm": "scrypt",
+                    "recovery": self._credential("admin", password), "owner": None,
+                })
+                return True
+            raw = self._raw_record()
+            if raw.get("version") == 2:
+                self._record()
+                return False
+            legacy = self._legacy_record(raw)
+            owner = None
+            legacy_is_setup_token = self._verify_credential(
+                legacy, str(legacy["username"]), password
+            )
+            if not legacy_is_setup_token and not bool(legacy["must_change_password"]):
+                owner = {key: legacy[key] for key in (
+                    "username", "n", "r", "p", "dklen", "salt", "verifier"
+                )}
+                if str(owner["username"]).casefold() == "admin":
+                    owner["username"] = "owner"
+            self._write({
+                "version": 2, "algorithm": "scrypt",
+                "recovery": self._credential("admin", password), "owner": owner,
+            })
+            return True
+
+    def _raw_record(self) -> dict[str, object]:
+        _validate_private_file(self.path)
+        try:
+            record = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AuthError(f"invalid password file: {self.path}") from exc
+        if not isinstance(record, dict):
+            raise AuthError(f"invalid password file: {self.path}")
+        return record
+
+    def _legacy_record(self, record: dict[str, object]) -> dict[str, object]:
+        required = {
+            "version", "algorithm", "username", "n", "r", "p", "dklen",
+            "salt", "verifier", "must_change_password",
+        }
+        if not required <= record.keys() or record.get("version") != 1 or record.get("algorithm") != "scrypt":
+            raise AuthError("unsupported password verifier")
+        self._validate_credential(record)
+        return record
+
+    def _record(self) -> dict[str, object]:
+        record = self._raw_record()
+        if record.get("version") != 2 or record.get("algorithm") != "scrypt":
+            raise AuthError("authentication file requires migration with auth init")
+        if not {"recovery", "owner"} <= record.keys():
+            raise AuthError(f"invalid password file: {self.path}")
+        recovery = self._validate_credential(record["recovery"])
+        if str(recovery["username"]).casefold() != "admin":
+            raise AuthError("recovery username must be admin")
+        if record["owner"] is not None:
+            owner = self._validate_credential(record["owner"])
+            self._validate_username(str(owner["username"]))
+        return record
+
+    @property
+    def setup_required(self) -> bool:
+        with self._lock:
+            return self._record()["owner"] is None
+
+    @property
+    def owner_username(self) -> str | None:
+        with self._lock:
+            owner = self._record()["owner"]
+            return None if owner is None else str(owner["username"])
+
+    def authenticate(self, username: str, password: str) -> tuple[str, str] | None:
+        if not 1 <= len(username) <= 64 or not 1 <= len(password) <= MAXIMUM_PASSWORD_LENGTH:
+            return None
+        with self._lock:
+            record = self._record()
+            recovery = record["recovery"]
+            owner = record["owner"]
+        selected = recovery if username.casefold() == "admin" else owner
+        if selected is None or not self._verify_credential(selected, username, password):
+            return None
+        role = "recovery" if selected is recovery else "owner"
+        return role, str(selected["username"])
+
+    def verify(self, username: str, password: str) -> bool:
+        return self.authenticate(username, password) is not None
+
+    def set_owner(self, username: str, password: str) -> None:
+        username = self._validate_username(username)
+        credential = self._credential(username, password)
+        with self._lock:
+            record = self._record()
+            record["owner"] = credential
+            self._write(record)
+
+    def change_owner_password(self, username: str, current_password: str, new_password: str) -> None:
+        with self._lock:
+            record = self._record()
+            owner = record["owner"]
+            if owner is None or not self._verify_credential(owner, username, current_password):
+                raise AuthError("current password is incorrect")
+            record["owner"] = self._credential(str(owner["username"]), new_password)
+            self._write(record)
+
+    def set_recovery_password(self, password: str) -> None:
+        with self._lock:
+            record = self._record()
+            record["recovery"] = self._credential("admin", password)
+            self._write(record)
+
+    def reset_owner(self) -> None:
+        with self._lock:
+            record = self._record()
+            record["owner"] = None
+            self._write(record)
 
 
 @dataclass(frozen=True)
 class Session:
     username: str
+    role: str
     csrf_token: str
     expires_at: float
-    must_change_password: bool = False
+    setup_required: bool = False
+    credential_generation: int = 0
 
 
 class SessionStore:
@@ -211,13 +325,15 @@ class SessionStore:
         while len(self._sessions) > self.maximum:
             self._sessions.popitem(last=False)
 
-    def create(self, username: str, *, must_change_password: bool = False) -> tuple[str, Session]:
+    def create(self, username: str, *, role: str = "owner",
+               setup_required: bool = False,
+               credential_generation: int = 0) -> tuple[str, Session]:
         with self._lock:
             self._prune()
             token = secrets.token_urlsafe(32)
             session = Session(
-                username, secrets.token_urlsafe(24), self._clock() + self.ttl_s,
-                must_change_password,
+                username, role, secrets.token_urlsafe(24), self._clock() + self.ttl_s,
+                setup_required, credential_generation,
             )
             self._sessions[self._key(token)] = session
             self._prune()
@@ -282,7 +398,7 @@ class LoginLimiter:
 
 
 class AuthManager:
-    """Authenticate one administrator and issue protected browser sessions."""
+    """Authenticate recovery/owner accounts and issue protected sessions."""
 
     cookie_name = "graber_session"
 
@@ -307,47 +423,79 @@ class AuthManager:
             return None
         with self._credential_lock:
             generation = self._credential_generation
-        if not self.password_store.verify(username, password):
+        authenticated = self.password_store.authenticate(username, password)
+        if authenticated is None:
             self.limiter.failed(client)
             return None
+        role, canonical_username = authenticated
         with self._credential_lock:
             if generation != self._credential_generation:
                 return None
             self.limiter.succeeded(client)
             return self.sessions.create(
-                username, must_change_password=self.password_store.must_change_password
+                canonical_username, role=role,
+                setup_required=self.password_store.setup_required,
+                credential_generation=self._credential_generation,
             )
 
     def change_password(self, session: Session, current_password: str | None,
                         new_password: str) -> tuple[str, Session]:
+        if session.role != "owner":
+            raise AuthError("recovery password can be changed only from the command line")
         with self._credential_lock:
-            generation = self._credential_generation
-        if not session.must_change_password and not self.password_store.verify(
-            session.username, current_password or ""
-        ):
-            raise AuthError("current password is incorrect")
-        with self._credential_lock:
-            if generation != self._credential_generation:
+            if session.credential_generation != self._credential_generation:
                 raise AuthError("credentials changed; sign in again")
-            self.password_store.set_password(session.username, new_password)
+            self.password_store.change_owner_password(
+                session.username, current_password or "", new_password
+            )
             self._credential_generation += 1
             self.sessions.clear()
-            return self.sessions.create(session.username)
+            return self.sessions.create(
+                session.username, role="owner",
+                credential_generation=self._credential_generation,
+            )
+
+    def configure_owner(self, session: Session, username: str,
+                        password: str) -> tuple[str, Session]:
+        if session.role != "recovery":
+            raise AuthError("only the recovery administrator can replace the owner account")
+        with self._credential_lock:
+            if session.credential_generation != self._credential_generation:
+                raise AuthError("credentials changed; sign in again")
+            self.password_store.set_owner(username, password)
+            self._credential_generation += 1
+            self.sessions.clear()
+            return self.sessions.create(
+                self.password_store.owner_username or username, role="owner",
+                credential_generation=self._credential_generation,
+            )
 
 
-def _set_password(args: argparse.Namespace) -> int:
+def _prompt_password() -> str:
     first = getpass.getpass("New password: ")
     second = getpass.getpass("Confirm password: ")
     if first != second:
         raise SystemExit("passwords do not match")
-    PasswordStore(args.file).set_password(args.username, first)
-    print(f"password updated: {args.file}")
+    return first
+
+
+def _set_recovery_password(args: argparse.Namespace) -> int:
+    if getattr(args, "username", "admin").casefold() != "admin":
+        raise SystemExit("the recovery username must be admin")
+    PasswordStore(args.file).set_recovery_password(_prompt_password())
+    print(f"recovery password updated: {args.file}")
     return 0
 
 
 def _initialize(args: argparse.Namespace) -> int:
-    created = PasswordStore(args.file).initialize(args.username, args.initial_password_file)
-    print(f"authentication {'initialized' if created else 'already initialized'}: {args.file}")
+    changed = PasswordStore(args.file).initialize(args.username, args.initial_password_file)
+    print(f"authentication {'initialized or migrated' if changed else 'already initialized'}: {args.file}")
+    return 0
+
+
+def _reset_owner(args: argparse.Namespace) -> int:
+    PasswordStore(args.file).reset_owner()
+    print(f"owner account reset: {args.file}")
     return 0
 
 
@@ -359,10 +507,20 @@ def main(argv: list[str] | None = None) -> int:
     initialize.add_argument("--initial-password-file", required=True, type=Path)
     initialize.add_argument("--username", default="admin")
     initialize.set_defaults(handler=_initialize)
-    password = commands.add_parser("set-password", help="set the administrator password")
+    recovery = commands.add_parser(
+        "set-recovery-password", help="rotate the recovery administrator password"
+    )
+    recovery.add_argument("--file", required=True, type=Path)
+    recovery.set_defaults(handler=_set_recovery_password)
+    password = commands.add_parser(
+        "set-password", help="compatibility alias for set-recovery-password"
+    )
     password.add_argument("--file", required=True, type=Path)
     password.add_argument("--username", default="admin")
-    password.set_defaults(handler=_set_password)
+    password.set_defaults(handler=_set_recovery_password)
+    reset = commands.add_parser("reset-owner", help="delete the everyday owner account")
+    reset.add_argument("--file", required=True, type=Path)
+    reset.set_defaults(handler=_reset_owner)
     args = parser.parse_args(argv)
     return args.handler(args)
 

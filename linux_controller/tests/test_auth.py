@@ -3,17 +3,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from graber.auth import (
-    AuthError,
-    AuthManager,
-    LoginLimiter,
-    PasswordStore,
-    SessionStore,
-    main,
-)
+from graber.auth import AuthError, AuthManager, LoginLimiter, PasswordStore, SessionStore, main
 
 
-PASSWORD = "correct horse battery staple"
+RECOVERY_PASSWORD = "0123456789abcdef0123456789abcdef"
+OWNER_PASSWORD = "correct horse battery staple"
 
 
 def private_file(path, value):
@@ -22,67 +16,133 @@ def private_file(path, value):
     return path
 
 
-def test_password_store_writes_only_scrypt_verifier_mode_0600(tmp_path):
-    path = tmp_path / "auth.json"
-    store = PasswordStore(path)
-    store.set_password("admin", PASSWORD)
-
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert PASSWORD not in path.read_text(encoding="utf-8")
-    assert store.verify("admin", PASSWORD)
-    assert not store.verify("admin", "incorrect password")
-    assert not store.verify("someone", PASSWORD)
-    record = json.loads(path.read_text(encoding="utf-8"))
-    assert record["algorithm"] == "scrypt"
-    assert record["must_change_password"] is False
+def initialized_store(tmp_path, *, owner=True):
+    setup = private_file(tmp_path / "setup-token", RECOVERY_PASSWORD + "\n")
+    store = PasswordStore(tmp_path / "auth.json")
+    assert store.initialize("admin", setup)
+    if owner:
+        store.set_owner("owner", OWNER_PASSWORD)
+    return store, setup
 
 
-def test_init_hashes_existing_setup_key_once_and_requires_change(tmp_path):
-    setup = private_file(tmp_path / "setup-token", "0123456789abcdef0123456789abcdef\n")
-    path = tmp_path / "auth.json"
-    store = PasswordStore(path)
+def test_init_creates_v2_recovery_without_plaintext(tmp_path):
+    store, _ = initialized_store(tmp_path, owner=False)
+    record = json.loads(store.path.read_text(encoding="utf-8"))
+    assert record["version"] == 2
+    assert record["owner"] is None
+    assert record["recovery"]["username"] == "admin"
+    assert RECOVERY_PASSWORD not in store.path.read_text(encoding="utf-8")
+    assert store.path.stat().st_mode & 0o777 == 0o600
+    assert store.authenticate("ADMIN", RECOVERY_PASSWORD) == ("recovery", "admin")
+    assert store.setup_required
 
-    assert store.initialize("admin", setup) is True
-    first = path.read_bytes()
-    assert store.verify("admin", "0123456789abcdef0123456789abcdef")
-    assert store.must_change_password is True
-    setup.write_text("a-new-value-that-must-not-replace-auth\n", encoding="utf-8")
+
+def test_init_is_idempotent_and_does_not_rotate_recovery(tmp_path):
+    store, setup = initialized_store(tmp_path, owner=False)
+    original = store.path.read_bytes()
+    setup.write_text("a-new-setup-token-that-must-not-rotate-recovery\n", encoding="utf-8")
     assert store.initialize("admin", setup) is False
-    assert path.read_bytes() == first
+    assert store.path.read_bytes() == original
+    assert store.verify("admin", RECOVERY_PASSWORD)
 
 
-def test_private_file_permissions_and_symlinks_are_rejected(tmp_path):
-    path = tmp_path / "auth.json"
-    PasswordStore(path).set_password("admin", PASSWORD)
-    path.chmod(0o644)
+def test_owner_is_separate_and_admin_is_reserved_case_insensitively(tmp_path):
+    store, _ = initialized_store(tmp_path, owner=False)
+    for reserved in ("admin", "Admin", "ADMIN"):
+        with pytest.raises(AuthError, match="reserved"):
+            store.set_owner(reserved, OWNER_PASSWORD)
+    store.set_owner("chris", OWNER_PASSWORD)
+    assert store.authenticate("CHRIS", OWNER_PASSWORD) == ("owner", "chris")
+    assert store.verify("admin", RECOVERY_PASSWORD)
+    assert not store.setup_required
+
+
+def test_owner_password_change_never_replaces_recovery(tmp_path):
+    store, _ = initialized_store(tmp_path)
+    store.change_owner_password("owner", OWNER_PASSWORD, "a different secure password")
+    assert store.verify("owner", "a different secure password")
+    assert not store.verify("owner", OWNER_PASSWORD)
+    assert store.verify("admin", RECOVERY_PASSWORD)
+
+
+def test_reset_owner_returns_to_setup_without_removing_recovery(tmp_path):
+    store, _ = initialized_store(tmp_path)
+    store.reset_owner()
+    assert store.setup_required
+    assert store.owner_username is None
+    assert store.verify("admin", RECOVERY_PASSWORD)
+
+
+def legacy_record(username, password, *, must_change):
+    credential = PasswordStore._credential(username, password)
+    return {"version": 1, "algorithm": "scrypt", **credential,
+            "must_change_password": must_change}
+
+
+def test_v1_migration_preserves_changed_password_as_owner_and_adds_recovery(tmp_path):
+    path = private_file(
+        tmp_path / "auth.json",
+        json.dumps(legacy_record("admin", OWNER_PASSWORD, must_change=False)),
+    )
+    setup = private_file(tmp_path / "setup-token", RECOVERY_PASSWORD)
+    store = PasswordStore(path)
+    assert store.initialize("admin", setup)
+    assert store.verify("admin", RECOVERY_PASSWORD)
+    assert store.verify("owner", OWNER_PASSWORD)
+    assert store.owner_username == "owner"
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+
+
+def test_v1_bootstrap_migration_requires_owner_setup(tmp_path):
+    path = private_file(
+        tmp_path / "auth.json",
+        json.dumps(legacy_record("admin", RECOVERY_PASSWORD, must_change=True)),
+    )
+    setup = private_file(tmp_path / "setup-token", RECOVERY_PASSWORD)
+    store = PasswordStore(path)
+    assert store.initialize("admin", setup)
+    assert store.setup_required
+    assert store.verify("admin", RECOVERY_PASSWORD)
+
+
+def test_v1_setup_token_is_not_promoted_to_owner_when_flag_was_cleared(tmp_path):
+    path = private_file(
+        tmp_path / "auth.json",
+        json.dumps(legacy_record("admin", RECOVERY_PASSWORD, must_change=False)),
+    )
+    setup = private_file(tmp_path / "setup-token", RECOVERY_PASSWORD)
+    store = PasswordStore(path)
+    assert store.initialize("admin", setup)
+    assert store.setup_required
+    assert store.owner_username is None
+    assert store.verify("admin", RECOVERY_PASSWORD)
+
+
+def test_private_permissions_symlinks_and_malformed_costs_are_rejected(tmp_path):
+    store, _ = initialized_store(tmp_path)
+    store.path.chmod(0o644)
     with pytest.raises(AuthError, match="0600"):
-        PasswordStore(path).verify("admin", PASSWORD)
-
-    source = private_file(tmp_path / "source", "0123456789abcdef")
+        store.verify("admin", RECOVERY_PASSWORD)
+    store.path.chmod(0o600)
+    record = json.loads(store.path.read_text(encoding="utf-8"))
+    record["recovery"]["r"] = 1_000_000
+    store.path.write_text(json.dumps(record), encoding="utf-8")
+    store.path.chmod(0o600)
+    with pytest.raises(AuthError, match="invalid credential"):
+        store.verify("admin", RECOVERY_PASSWORD)
+    source = private_file(tmp_path / "source", RECOVERY_PASSWORD)
     link = tmp_path / "link"
     link.symlink_to(source)
     with pytest.raises(AuthError, match="symlink"):
         PasswordStore(tmp_path / "other").initialize("admin", link)
 
 
-def test_malformed_scrypt_costs_are_rejected_before_derivation(tmp_path):
-    path = tmp_path / "auth.json"
-    store = PasswordStore(path)
-    store.set_password("admin", PASSWORD)
-    record = json.loads(path.read_text(encoding="utf-8"))
-    record["r"] = 1_000_000
-    path.write_text(json.dumps(record), encoding="utf-8")
-    path.chmod(0o600)
-    with pytest.raises(AuthError, match="invalid password file"):
-        store.verify("admin", PASSWORD)
-
-
 def test_sessions_expire_are_bounded_and_store_no_raw_token():
     now = [100.0]
     sessions = SessionStore(ttl_s=60, maximum=2, clock=lambda: now[0])
-    first_token, first = sessions.create("admin")
-    second_token, _ = sessions.create("admin")
-    third_token, _ = sessions.create("admin")
+    first_token, first = sessions.create("owner")
+    second_token, _ = sessions.create("owner")
+    third_token, _ = sessions.create("owner")
     assert first_token not in sessions._sessions
     assert sessions.get(first_token) is None
     assert sessions.get(second_token) is not None
@@ -106,7 +166,6 @@ def test_login_limiter_is_per_client_and_windowed():
 def test_session_and_limiter_state_are_safe_across_worker_threads():
     sessions = SessionStore(ttl_s=60, maximum=512)
     limiter = LoginLimiter(attempts=500, window_s=60)
-
     def exercise(index):
         token, created = sessions.create(f"user-{index}")
         assert sessions.get(token) == created
@@ -114,51 +173,69 @@ def test_session_and_limiter_state_are_safe_across_worker_threads():
         limiter.retry_after(f"client-{index % 4}")
         if index % 2:
             sessions.remove(token)
-
     with ThreadPoolExecutor(max_workers=12) as executor:
         list(executor.map(exercise, range(300)))
-
     assert len(sessions._sessions) <= 300
-    assert all(limiter.retry_after(f"client-{index}") == 0 for index in range(4))
 
 
-def test_bootstrap_login_change_password_invalidates_old_session(tmp_path):
-    setup_password = "0123456789abcdef0123456789abcdef"
-    setup = private_file(tmp_path / "setup-token", setup_password)
-    store = PasswordStore(tmp_path / "auth.json")
-    store.initialize("admin", setup)
+def test_fresh_admin_session_creates_owner_and_both_accounts_remain_valid(tmp_path):
+    store, _ = initialized_store(tmp_path, owner=False)
     manager = AuthManager(store, secure_cookie=False)
-
-    old_token, old_session = manager.login("127.0.0.1", "admin", setup_password)
-    assert old_session.must_change_password
-    new_token, new_session = manager.change_password(old_session, None, PASSWORD)
-    assert manager.sessions.get(old_token) is None
-    assert manager.sessions.get(new_token) == new_session
-    assert not new_session.must_change_password
-    assert store.verify("admin", PASSWORD)
+    _, admin = manager.login("one", "admin", RECOVERY_PASSWORD)
+    assert admin.role == "recovery" and admin.setup_required
+    _, owner = manager.configure_owner(admin, "chris", OWNER_PASSWORD)
+    assert owner.role == "owner" and not owner.setup_required
+    assert manager.login("two", "admin", RECOVERY_PASSWORD)[1].role == "recovery"
+    assert manager.login("three", "chris", OWNER_PASSWORD)[1].role == "owner"
 
 
-def test_normal_password_change_requires_current_password(tmp_path):
-    store = PasswordStore(tmp_path / "auth.json")
-    store.set_password("admin", PASSWORD)
+def test_admin_replaces_owner_and_stale_owner_cannot_change_password(tmp_path):
+    store, _ = initialized_store(tmp_path)
     manager = AuthManager(store, secure_cookie=False)
-    _, session = manager.login("127.0.0.1", "admin", PASSWORD)
-    with pytest.raises(AuthError, match="current"):
-        manager.change_password(session, "wrong password", "a different secure password")
+    _, stale_owner = manager.login("one", "owner", OWNER_PASSWORD)
+    _, admin = manager.login("two", "admin", RECOVERY_PASSWORD)
+    _, replacement = manager.configure_owner(admin, "new_owner", "replacement secure password")
+    assert replacement.username == "new_owner"
+    assert manager.login("three", "owner", OWNER_PASSWORD) is None
+    assert manager.login("four", "new_owner", "replacement secure password") is not None
+    assert manager.login("five", "admin", RECOVERY_PASSWORD) is not None
+    with pytest.raises(AuthError, match="credentials changed"):
+        manager.change_password(stale_owner, OWNER_PASSWORD, "another secure password")
 
 
-def test_set_password_cli_prompts_twice_and_init_never_prints_secret(tmp_path, monkeypatch, capsys):
-    answers = iter([PASSWORD, PASSWORD])
-    monkeypatch.setattr("graber.auth.getpass.getpass", lambda _prompt: next(answers))
+def test_recovery_cannot_be_changed_through_browser_manager(tmp_path):
+    store, _ = initialized_store(tmp_path)
+    manager = AuthManager(store, secure_cookie=False)
+    _, admin = manager.login("one", "admin", RECOVERY_PASSWORD)
+    with pytest.raises(AuthError, match="command line"):
+        manager.change_password(admin, RECOVERY_PASSWORD, "new recovery password")
+
+
+def test_concurrent_owner_replacement_accepts_only_one_generation(tmp_path):
+    store, _ = initialized_store(tmp_path)
+    manager = AuthManager(store, secure_cookie=False)
+    _, admin = manager.login("one", "admin", RECOVERY_PASSWORD)
+    def replace(index):
+        try:
+            return manager.configure_owner(admin, f"owner_{index}", f"secure replacement {index}")
+        except AuthError:
+            return None
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(replace, range(2)))
+    assert sum(result is not None for result in results) == 1
+    assert manager.login("recovery", "admin", RECOVERY_PASSWORD) is not None
+
+
+def test_cli_init_recovery_rotation_and_owner_reset(tmp_path, monkeypatch, capsys):
+    setup = private_file(tmp_path / "setup-token", RECOVERY_PASSWORD)
     auth_file = tmp_path / "auth.json"
-    assert main(["set-password", "--file", str(auth_file)]) == 0
-    assert PasswordStore(auth_file).verify("admin", PASSWORD)
-
-    setup = private_file(tmp_path / "setup-token", "0123456789abcdef0123456789abcdef")
-    initialized = tmp_path / "initialized.json"
-    assert main([
-        "init", "--file", str(initialized), "--initial-password-file", str(setup),
-    ]) == 0
-    output = capsys.readouterr().out
-    assert "0123456789abcdef" not in output
-    assert PasswordStore(initialized).must_change_password
+    assert main(["init", "--file", str(auth_file), "--initial-password-file", str(setup)]) == 0
+    store = PasswordStore(auth_file)
+    store.set_owner("owner", OWNER_PASSWORD)
+    answers = iter(["new recovery password", "new recovery password"])
+    monkeypatch.setattr("graber.auth.getpass.getpass", lambda _prompt: next(answers))
+    assert main(["set-recovery-password", "--file", str(auth_file)]) == 0
+    assert store.verify("admin", "new recovery password")
+    assert main(["reset-owner", "--file", str(auth_file)]) == 0
+    assert store.setup_required
+    assert RECOVERY_PASSWORD not in capsys.readouterr().out

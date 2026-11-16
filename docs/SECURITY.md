@@ -15,9 +15,16 @@ are stored as salted hashes. The private controller token is injected only on
 the loopback hop and is never stored by browser JavaScript. Identification jog
 also retains its explicit live gate.
 
-The installer initially hashes the existing private setup key and marks that
-credential for mandatory replacement. After the first password change, the
-setup key remains an internal loopback credential and is not a portal password.
+The installer hashes the existing private setup key as the permanent `admin`
+recovery password. The first administrator login creates a separate everyday
+owner account. Use the owner account for normal setup and control; reserve
+`admin` for resetting the owner. The recovery password remains valid until it is
+explicitly rotated offline.
+
+Store the setup token as a recovery secret: access to it grants administrative
+portal control. Never use it as the owner password, MQTT password, or a
+credential for another service. The controller keeps its own internal use of
+that private file on the loopback-only child connection.
 
 Plain HTTP still exposes login credentials, cookies, state, and commands to an
 observer on the network. For long-term use, bind the portal to loopback and use
@@ -33,7 +40,7 @@ Use a dedicated, non-administrator MQTT account with a randomly generated
 password. Store it only in private `secrets.toml`. Prefer broker TLS with
 hostname verification; plain MQTT exposes credentials and commands to anyone
 able to observe that network segment. Do not expose the broker to the internet.
-Never reuse the portal password or internal controller token for MQTT.
+Never reuse either portal password or the internal controller token for MQTT.
 
 MQTT movement commands are never retained. Duplicate QoS deliveries reuse an
 in-memory ID, and movement queues do not survive restart. Discovery can use

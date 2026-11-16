@@ -192,9 +192,9 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
         ("GET", "/assets/app.css"),
         ("POST", "/api/auth/login"),
     }
-    password_routes = {
+    setup_routes = {
         ("GET", "/api/auth/session"),
-        ("POST", "/api/auth/password"),
+        ("POST", "/api/auth/account"),
         ("POST", "/api/auth/logout"),
     }
 
@@ -234,12 +234,12 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
             return web.json_response({"error": "client is outside allowed networks"}, status=403)
         return await handler(request)
 
-    def unauthorized(request: web.Request, *, password_change: bool = False) -> web.StreamResponse:
+    def unauthorized(request: web.Request, *, setup_required: bool = False) -> web.StreamResponse:
         if request.path.startswith("/api/"):
             payload = {"error": "authentication required"}
-            if password_change:
-                payload = {"error": "password change required", "must_change_password": True}
-            return web.json_response(payload, status=403 if password_change else 401)
+            if setup_required:
+                payload = {"error": "owner account setup required", "setup_required": True}
+            return web.json_response(payload, status=403 if setup_required else 401)
         raise web.HTTPSeeOther("/login")
 
     @web.middleware
@@ -253,8 +253,8 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
             return unauthorized(request)
         request["graber_session"] = session
         request["graber_session_token"] = token
-        if session.must_change_password and route not in password_routes:
-            return unauthorized(request, password_change=True)
+        if session.setup_required and route not in setup_routes:
+            return unauthorized(request, setup_required=True)
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             supplied = request.headers.get("X-CSRF-Token", "")
             if not hmac.compare_digest(supplied, session.csrf_token):
@@ -285,8 +285,9 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
         return {
             "authenticated": True,
             "username": session.username,
+            "role": session.role,
             "csrf_token": session.csrf_token,
-            "must_change_password": session.must_change_password,
+            "setup_required": session.setup_required,
         }
 
     def set_session_cookie(response: web.StreamResponse, token: str) -> None:
@@ -388,6 +389,33 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
         set_session_cookie(response, token)
         return response
 
+    async def configure_account(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            if not isinstance(body, Mapping):
+                raise TypeError
+        except (json.JSONDecodeError, TypeError):
+            return web.json_response({"error": "invalid request"}, status=400)
+        username = str(body.get("username", ""))
+        password = str(body.get("password", ""))
+        if not 1 <= len(username) <= 64 or len(password) > MAXIMUM_PASSWORD_LENGTH:
+            return web.json_response({"error": "invalid account"}, status=400)
+        try:
+            await asyncio.wait_for(password_checks.acquire(), timeout=2)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "authentication is busy"}, status=503)
+        try:
+            token, session = await asyncio.to_thread(
+                auth_manager.configure_owner, request["graber_session"], username, password
+            )
+        except AuthError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        finally:
+            password_checks.release()
+        response = web.json_response(session_payload(session))
+        set_session_cookie(response, token)
+        return response
+
     async def portal_status(_request: web.Request) -> web.Response:
         return web.json_response({"mode": supervisor.mode})
 
@@ -439,6 +467,7 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
     app.router.add_get("/api/auth/session", auth_session)
     app.router.add_post("/api/auth/logout", logout)
     app.router.add_post("/api/auth/password", change_password)
+    app.router.add_post("/api/auth/account", configure_account)
     app.router.add_get("/api/portal/status", portal_status)
     app.router.add_post("/api/portal/setup", enter_setup)
     app.router.add_route("*", "/{path:.*}", proxy)
