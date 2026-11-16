@@ -39,6 +39,17 @@ def test_loads_separate_secrets_without_leaking_repr(tmp_path: Path):
     assert result.blinds[0].access_code == "0123456"
     assert "0123456" not in repr(result)
     assert result.groups[0].members == ("living_left",)
+    assert result.blinds[0].battery_interval_s == 3600
+
+
+def test_rejects_nonpositive_battery_interval(tmp_path: Path):
+    config, secrets = write_config(tmp_path)
+    config.write_text(config.read_text().replace(
+        'preferred_adapter = "external_a"',
+        'preferred_adapter = "external_a"\nbattery_interval_s = 0',
+    ))
+    with pytest.raises(ConfigError, match="battery_interval_s must be positive"):
+        load_config(config, secrets)
 
 
 def test_rejects_permissive_secret_file(tmp_path: Path):

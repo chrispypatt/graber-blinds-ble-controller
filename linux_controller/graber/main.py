@@ -20,9 +20,36 @@ from .group_controller import Controller
 
 LOG = logging.getLogger("graber")
 
+# Even if a local config is accidentally set too low, background battery work
+# must remain low-frequency in production. Tests can inject a smaller floor.
+MINIMUM_BATTERY_REFRESH_S = 60.0
+
 
 def telemetry(event: str, fields: dict[str, object]) -> None:
     LOG.info("%s %s", event, json.dumps(fields, sort_keys=True, default=str))
+
+
+async def refresh_battery_periodically(
+    blind: BlindController,
+    report=telemetry,
+    *,
+    minimum_interval_s: float = MINIMUM_BATTERY_REFRESH_S,
+) -> None:
+    """Refresh one blind's status without movement writes or rapid retries."""
+    interval_s = max(minimum_interval_s, blind.config.battery_interval_s)
+    if blind.state.battery is not None:
+        await asyncio.sleep(interval_s)
+    while True:
+        try:
+            await blind.refresh_status()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            report("battery_refresh_failed", {
+                "blind_id": blind.config.id,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        await asyncio.sleep(interval_s)
 
 
 async def run_service(config_path: str, secrets_path: str, *, web_override=None) -> None:
@@ -110,6 +137,48 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
             )
         web_runner = await start_web(controller, web_override)
         cleanup.append(web_runner.cleanup)
+    blinds_by_address = {
+        dispatcher.blind.config.address.upper(): dispatcher.blind
+        for dispatcher in dispatchers.values()
+    }
+    def advertisement_observed(device) -> None:
+        blind = blinds_by_address.get(device.address.upper())
+        if blind is not None:
+            blind.observe_advertisement(device)
+    async def monitor_advertisements() -> None:
+        last_resolution_error: str | None = None
+        while True:
+            adapters: dict[str, str] = {}
+            resolution_error: Exception | None = None
+            for blind_config in config.blinds:
+                try:
+                    for runtime in await manager.candidates(blind_config):
+                        if runtime.resolved is not None:
+                            adapters[runtime.config.id] = runtime.resolved.device
+                except Exception as exc:
+                    resolution_error = exc
+            if not adapters:
+                if resolution_error is not None:
+                    error = f"{type(resolution_error).__name__}: {resolution_error}"
+                    if error != last_resolution_error:
+                        service_telemetry("advertisement_adapters_unavailable", {"error": error})
+                    last_resolution_error = error
+                await asyncio.sleep(5)
+                continue
+            last_resolution_error = None
+            results = await asyncio.gather(*(
+                transport.monitor_advertisements(
+                    device, advertisement_observed, 30, set(blinds_by_address)
+                )
+                for device in adapters.values()
+            ), return_exceptions=True)
+            for adapter_id, result in zip(adapters, results):
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                    service_telemetry("advertisement_monitor_failed", {
+                        "adapter_id": adapter_id,
+                        "error": f"{type(result).__name__}: {result}",
+                    })
+            await asyncio.sleep(0.25)
     async def refresh_adapter_health() -> None:
         while True:
             await asyncio.sleep(30)
@@ -118,13 +187,26 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
                 for adapter_id, health in manager.health().items():
                     bridge.publish_adapter_health(adapter_id, health)
     health_task = asyncio.create_task(refresh_adapter_health(), name="adapter-health")
+    advertisement_task = asyncio.create_task(
+        monitor_advertisements(), name="advertisement-monitor"
+    )
+    battery_tasks = tuple(
+        asyncio.create_task(
+            refresh_battery_periodically(dispatcher.blind, service_telemetry),
+            name=f"battery-refresh-{blind_id}",
+        )
+        for blind_id, dispatcher in dispatchers.items()
+    )
     LOG.info("controller_ready blinds=%d adapters=%d", len(config.blinds), len(config.adapters))
     try:
         await stop.wait()
     finally:
-        health_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await health_task
+        background_tasks = (advertisement_task, health_task, *battery_tasks)
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         for close in reversed(cleanup):
             await close()
         await controller.close()

@@ -1,17 +1,147 @@
 'use strict';
-const $=selector=>document.querySelector(selector);const $$=selector=>[...document.querySelectorAll(selector)];let state={blinds:{},groups:{},adapters:{},_web:{}};let token=sessionStorage.getItem('graberControlToken')||'';const pending=new Set();
-function esc(value){const node=document.createElement('span');node.textContent=String(value??'');return node.innerHTML}function toast(message,type='success',timeout=4500){const item=document.createElement('div');item.className=`toast ${type}`;item.textContent=message;$('#toasts').append(item);setTimeout(()=>item.remove(),timeout)}
-function formatTime(epoch){if(!epoch)return'Never';return new Date(epoch*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}
+
+const $=selector=>document.querySelector(selector);
+const $$=selector=>[...document.querySelectorAll(selector)];
+let state={blinds:{},groups:{},adapters:{},_web:{}};
+let token=sessionStorage.getItem('graberControlToken')||'';
+const pending=new Set();
+const activeRequests=new Map();
+const sliderDrafts=new Map();
+const railSelections=new Map();
+const expandedSections=new Set();
+
+function esc(value){const node=document.createElement('span');node.textContent=String(value??'');return node.innerHTML}
+function toast(message,type='success',timeout=4500){const item=document.createElement('div');item.className=`toast ${type}`;item.textContent=message;$('#toasts').append(item);setTimeout(()=>item.remove(),timeout)}
+function formatTime(epoch){if(!epoch)return'Waiting for signal';return new Date(epoch*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}
+function draftKey(id,action){return`${id}:${action}`}
+function draftValue(id,action,fallback){const key=draftKey(id,action);return sliderDrafts.has(key)?sliderDrafts.get(key):fallback}
+function pendingKey(targetType,id,action){return`${targetType}:${id}:${action}`}
+function targetPending(targetType,id){return[...pending].some(key=>key.startsWith(`${targetType}:${id}:`))}
 async function getState(){const response=await fetch('/api/state');if(!response.ok)throw new Error('Controller unavailable');return response.json()}
-async function command(id,action,position=null){if(!state._web.live_controls){toast('Live controls are disabled in the controller configuration.','error');return}if(state._web.token_required&&!token){openAuth();toast('Enter the control token before moving a shade.','error');return}pending.add(id);render();try{const response=await fetch(`/api/targets/${encodeURIComponent(id)}/commands`,{method:'POST',headers:{'Content-Type':'application/json',...(token?{'X-Graber-Control-Token':token}:{})},body:JSON.stringify({action,...(position==null?{}:{position})})});const body=await response.json();if(!response.ok)throw new Error(body.error||'Command rejected');const outcome=body.result?.outcome||body.result?.successful;toast(outcome==='completed'||outcome===true?'Movement confirmed.':'Command finished; check the reported position.',outcome==='completed'||outcome===true?'success':'error',6000)}catch(error){toast(error.message,'error',6000)}finally{pending.delete(id);await refresh()}}
-function button(label,action,id,kind='secondary'){return`<button class="button ${kind}" data-command="${esc(action)}" data-target="${esc(id)}" ${pending.has(id)||!state._web.live_controls?'disabled':''}>${esc(label)}</button>`}
-function bindCommands(root=document){root.querySelectorAll('[data-command]').forEach(node=>node.addEventListener('click',()=>command(node.dataset.target,node.dataset.command,node.dataset.position==null?null:Number(node.dataset.position))))}
-function groupCard(id,item){const card=document.createElement('article');card.className='group-card';card.innerHTML=`<h3>${esc(item.name||id)}</h3><p>${item.members?.length||0} shades · ${esc(item.mode||'best effort').replace('_',' ')}</p><div class="quick-actions">${button('Open','open',id)}${button('Stop','stop',id,'stop')}${button('Close','close',id)}</div>`;bindCommands(card);return card}
-function slider(id,label,action,value){const safe=value??50;return`<div class="slider-row"><label><span>${esc(label)}</span><output>${esc(value==null?'Unknown':`${value}%`)}</output></label><input type="range" min="0" max="100" value="${safe}" data-slider><div class="slider-actions"><button class="button secondary compact" data-command="${action}" data-target="${esc(id)}" data-position="${safe}" ${!state._web.live_controls?'disabled':''}>Set position</button></div></div>`}
-function blindCard(id,item){const card=document.createElement('article');card.className='blind-card';const bottom=item.bottom;const coverage=Math.max(6,100-(bottom??50));const battery=item.battery==null?'':` · Battery ${esc(item.battery)}%`;card.innerHTML=`<div class="blind-top"><div><h3>${esc(item.name||id)}</h3><p class="card-meta">${item.dual_rail?'TDBU shade':'Single-rail shade'}${battery}</p></div><span class="badge ${item.last_command_status==='completed'?'ready':''}">${pending.has(id)?'Working…':esc(item.last_command_status||'Idle')}</span></div><div class="shade-visual"><div class="shade-panel" style="--shade-height:${coverage}%"></div></div><div class="blind-state"><span>${bottom==null?'Position unknown':`Bottom ${esc(bottom)}%`}${item.dual_rail&&item.top!=null?` · Top ${esc(item.top)}%`:''}</span><span>Updated ${formatTime(item.updated_at)}</span></div><div class="blind-controls">${button('Open','open',id)}${button('Stop','stop',id,'danger')}${button('Close','close',id)}</div>${slider(id,item.dual_rail?'Bottom rail':'Position','set_bottom_position',bottom)}${item.dual_rail?slider(id,'Top rail','set_top_position',item.top):''}${item.dual_rail?`<details class="more-controls"><summary>More shade actions</summary><div>${button('Favorite','favorite',id)}${button('Stack up','stack_up',id)}${button('Stack down','stack_down',id)}</div></details>`:''}`;card.querySelectorAll('[data-slider]').forEach(range=>range.addEventListener('input',()=>{const row=range.closest('.slider-row');row.querySelector('output').textContent=`${range.value}%`;row.querySelector('[data-position]').dataset.position=range.value}));bindCommands(card);return card}
-function render(){const blinds=Object.entries(state.blinds||{});const groups=Object.entries(state.groups||{});const adapters=Object.entries(state.adapters||{});$('#controllerStatus').className='status-pill online';$('#controllerStatus').innerHTML='<i></i>Online';$('#dashboardSummary').textContent=`${blinds.length} shades · ${groups.length} groups`;$('#controlNotice').classList.toggle('is-hidden',state._web.live_controls);$('#authButton').textContent=state._web.token_required?(token?'Access ready':'Control access'):'Controls';$('#groupSection').classList.toggle('is-hidden',groups.length===0);const groupGrid=$('#groupGrid');groupGrid.innerHTML='';groups.forEach(([id,item])=>groupGrid.append(groupCard(id,item)));renderBlinds();const adapterGrid=$('#adapterGrid');adapterGrid.innerHTML='';adapters.forEach(([id,item])=>{const card=document.createElement('article');card.className='adapter-card';card.innerHTML=`<strong>${esc(id)}</strong><p>Status: ${esc(item.status||'unknown')}</p><p>Connections: ${esc(item.connection_successes??0)} / ${esc(item.connection_attempts??0)}</p><p>Failures: ${esc(item.failures??0)} ${item.last_error?`· ${esc(item.last_error)}`:''}</p>`;adapterGrid.append(card)});$('#adapterSummary').textContent=adapters.length?`${adapters.filter(([,a])=>a.status==='healthy'||a.available).length} of ${adapters.length} healthy`:'No telemetry'}
-function renderBlinds(){const query=$('#blindSearch').value.trim().toLowerCase();const grid=$('#blindGrid');grid.innerHTML='';Object.entries(state.blinds||{}).filter(([id,item])=>!query||`${id} ${item.name}`.toLowerCase().includes(query)).forEach(([id,item])=>grid.append(blindCard(id,item)))}
+
+async function command(id,action,position=null,targetType='blind'){
+  if(!state._web.live_controls){toast('Live controls are disabled.','error');return}
+  if(state._web.token_required&&!token){openAuth();toast('Enter the control token first.','error');return}
+  const activeKey=pendingKey(targetType,id,action);
+  const targetKey=`${targetType}:${id}`;
+  if(action==='stop')activeRequests.get(targetKey)?.abort();
+  const requestController=new AbortController();
+  activeRequests.set(targetKey,requestController);
+  pending.add(activeKey);render();
+  let completed=false;
+  try{
+    const response=await fetch(`/api/${targetType==='group'?'groups':'blinds'}/${encodeURIComponent(id)}/commands`,{method:'POST',headers:{'Content-Type':'application/json',...(token?{'X-Graber-Control-Token':token}:{})},body:JSON.stringify({action,...(position==null?{}:{position})}),signal:requestController.signal});
+    const body=await response.json();
+    if(!response.ok)throw new Error(body.error||'Command rejected');
+    const outcome=body.result?.outcome||body.result?.successful;
+    completed=action==='refresh_status'||outcome==='completed'||outcome===true;
+    const message=action==='refresh_status'?'Status updated.':completed?'Movement confirmed.':'Command finished; check the reported position.';
+    toast(message,completed?'success':'error',6000);
+  }catch(error){if(error.name!=='AbortError')toast(error.message,'error',6000)}
+  finally{
+    if(completed&&position!=null)sliderDrafts.delete(draftKey(id,action));
+    if(activeRequests.get(targetKey)===requestController)activeRequests.delete(targetKey);
+    pending.delete(activeKey);
+    await refresh();
+  }
+}
+
+function button(label,action,id,kind='secondary',targetType='blind'){
+  const blocked=action==='stop'?pending.has(pendingKey(targetType,id,action)):targetPending(targetType,id);
+  return`<button class="button ${kind}" data-command="${esc(action)}" data-target="${esc(id)}" data-target-type="${esc(targetType)}" ${blocked||!state._web.live_controls?'disabled':''}>${esc(label)}</button>`;
+}
+function bindCommands(root=document){root.querySelectorAll('[data-command]').forEach(node=>node.addEventListener('click',()=>command(node.dataset.target,node.dataset.command,node.dataset.position==null?null:Number(node.dataset.position),node.dataset.targetType))) }
+
+function groupCard(id,item){
+  const card=document.createElement('article');
+  card.className='group-card';
+  card.innerHTML=`<h3>${esc(item.name||id)}</h3><p>${item.members?.length||0} shades · ${esc(item.mode||'best effort').replace('_',' ')}</p><div class="quick-actions">${button('Open','open',id,'secondary','group')}${button('Stop','stop',id,'stop','group')}${button('Close','close',id,'secondary','group')}</div>`;
+  bindCommands(card);
+  return card;
+}
+
+function slider(id,label,action,value,startLabel,endLabel){
+  const safe=draftValue(id,action,value??50);
+  const unknown=value==null&&!sliderDrafts.has(draftKey(id,action));
+  return`<div class="slider-row" data-position-control="${esc(action)}"><label><span>${esc(label)}</span><output>${esc(unknown?'Unknown':`${safe}%`)}</output></label><input type="range" min="0" max="100" value="${safe}" data-slider data-action="${esc(action)}" aria-label="${esc(label)}"><div class="range-labels"><span>${esc(startLabel)}</span><span>${esc(endLabel)}</span></div><div class="slider-actions"><button class="button secondary compact" data-command="${esc(action)}" data-target="${esc(id)}" data-target-type="blind" data-position="${safe}" ${targetPending('blind',id)||!state._web.live_controls?'disabled':''}>Set</button></div></div>`;
+}
+
+function applyVisual(card,id,item){
+  const visual=card.querySelector('.shade-visual');
+  const bottom=draftValue(id,'set_bottom_position',item.bottom??50);
+  if(!item.dual_rail){
+    visual.style.setProperty('--shade-height',`${Math.max(6,100-bottom)}%`);
+    return;
+  }
+  const top=draftValue(id,'set_top_position',item.top??0);
+  const topY=Math.max(3,Math.min(97,top));
+  const bottomY=Math.max(3,Math.min(97,100-bottom));
+  visual.style.setProperty('--top-y',`${topY}%`);
+  visual.style.setProperty('--bottom-y',`${bottomY}%`);
+  visual.style.setProperty('--fabric-height',`${Math.max(0,bottomY-topY)}%`);
+}
+
+function tdbuPositionControl(id,item){
+  const selected=railSelections.get(id)||'bottom';
+  const action=selected==='top'?'set_top_position':'set_bottom_position';
+  const value=selected==='top'?item.top:item.bottom;
+  const labels=selected==='top'?['0% · Top','100% · Bottom']:['0% · Closed','100% · Open'];
+  return`<div class="tdbu-position"><label class="rail-select"><span>Adjust rail</span><select data-rail-select data-target="${esc(id)}"><option value="bottom" ${selected==='bottom'?'selected':''}>Bottom rail</option><option value="top" ${selected==='top'?'selected':''}>Top rail</option></select></label>${slider(id,selected==='top'?'Top rail position':'Bottom rail position',action,value,labels[0],labels[1])}<p class="rail-note">Setting one rail may reposition the other. Use Move both to preserve their spacing.</p></div>`;
+}
+
+function blindCard(id,item){
+  const card=document.createElement('article');
+  card.className='blind-card';
+  const battery=item.battery==null?'—':`${esc(item.battery)}%`;
+  const positionText=item.bottom==null?'Position unknown':item.dual_rail?`Bottom ${esc(item.bottom)}%${item.top==null?'':` · Top ${esc(item.top)}%`}`:`${esc(item.bottom)}% open`;
+  const positionControls=item.dual_rail?tdbuPositionControl(id,item):slider(id,'Position','set_bottom_position',item.bottom,'0% · Closed','100% · Open');
+  const statusControl=item.bottom==null||item.battery==null?button('Refresh status','refresh_status',id,'ghost compact'):`<span>Updated ${formatTime(item.updated_at)}</span>`;
+  card.innerHTML=`<div class="blind-top"><div><h3>${esc(item.name||id)}</h3><p class="card-meta">${item.dual_rail?'TDBU shade':'Single-rail shade'} · Battery <span title="Battery requires a Bluetooth connection">${battery}</span></p></div><span class="badge ${item.last_command_status==='completed'?'ready':''}">${targetPending('blind',id)?'Working…':esc(item.last_command_status||'Idle')}</span></div><div class="shade-visual ${item.dual_rail?'tdbu-visual':''}">${item.dual_rail?'<div class="tdbu-fabric"></div><span class="tdbu-rail top-rail"></span><span class="tdbu-rail bottom-rail"></span>':'<div class="shade-panel"></div>'}</div><div class="blind-state"><span>${positionText}</span>${statusControl}</div><div class="blind-controls">${button('Open','open',id)}${button('Stop','stop',id,'danger')}${button('Close','close',id)}</div>${positionControls}${item.dual_rail?`<details class="more-controls" ${expandedSections.has(id)?'open':''}><summary>Coupled movement</summary><div>${button('Move both up 5%','stack_up',id)}${button('Move both down 5%','stack_down',id)}${button('Favorite','favorite',id)}</div></details>`:''}`;
+  card.querySelector('details.more-controls')?.addEventListener('toggle',event=>{if(event.target.open)expandedSections.add(id);else expandedSections.delete(id)});
+  card.querySelector('[data-rail-select]')?.addEventListener('change',event=>{sliderDrafts.delete(draftKey(id,'set_bottom_position'));sliderDrafts.delete(draftKey(id,'set_top_position'));railSelections.set(id,event.target.value);renderBlinds()});
+  card.querySelectorAll('[data-slider]').forEach(range=>range.addEventListener('input',()=>{
+    const action=range.dataset.action;
+    if(item.dual_rail)sliderDrafts.delete(draftKey(id,action==='set_top_position'?'set_bottom_position':'set_top_position'));
+    sliderDrafts.set(draftKey(id,action),Number(range.value));
+    const row=range.closest('.slider-row');
+    row.querySelector('output').textContent=`${range.value}%`;
+    row.querySelector('[data-position]').dataset.position=range.value;
+    applyVisual(card,id,item);
+  }));
+  applyVisual(card,id,item);
+  bindCommands(card);
+  return card;
+}
+
+function render(){
+  const blinds=Object.entries(state.blinds||{}),groups=Object.entries(state.groups||{}),adapters=Object.entries(state.adapters||{});
+  $('#controllerStatus').className='status-pill online';$('#controllerStatus').innerHTML='<i></i>Online';
+  $('#dashboardSummary').textContent=`${blinds.length} shades · ${groups.length} groups`;
+  $('#controlNotice').classList.toggle('is-hidden',state._web.live_controls);
+  $('#authButton').textContent=state._web.token_required?(token?'Access ready':'Control access'):'Controls';
+  $('#groupSection').classList.toggle('is-hidden',groups.length===0);
+  const groupGrid=$('#groupGrid');groupGrid.innerHTML='';groups.forEach(([id,item])=>groupGrid.append(groupCard(id,item)));
+  renderBlinds();
+  const adapterGrid=$('#adapterGrid');adapterGrid.innerHTML='';
+  adapters.forEach(([id,item])=>{const card=document.createElement('article');card.className='adapter-card';card.innerHTML=`<strong>${esc(id)}</strong><p>Status: ${esc(item.status||'unknown')}</p><p>Connections: ${esc(item.connection_successes??0)} / ${esc(item.connection_attempts??0)}</p><p>Failures: ${esc(item.failures??0)} ${item.last_error?`· ${esc(item.last_error)}`:''}</p>`;adapterGrid.append(card)});
+  $('#adapterSummary').textContent=adapters.length?`${adapters.filter(([,a])=>a.status==='healthy'||a.status==='online'||a.available).length} of ${adapters.length} healthy`:'No telemetry';
+}
+
+function renderBlinds(){
+  const query=$('#blindSearch').value.trim().toLowerCase(),grid=$('#blindGrid');
+  grid.innerHTML='';
+  Object.entries(state.blinds||{}).filter(([id,item])=>!query||`${id} ${item.name}`.toLowerCase().includes(query)).forEach(([id,item])=>grid.append(blindCard(id,item)));
+}
+
 async function refresh(){if(document.activeElement?.type==='range')return;try{state=await getState();render()}catch(error){$('#controllerStatus').className='status-pill error';$('#controllerStatus').innerHTML='<i></i>Controller unavailable'}}
-function openAuth(){$('#authModal').classList.remove('is-hidden');$('#controlToken').value=token;$('#controlToken').focus()}function closeAuth(){$('#authModal').classList.add('is-hidden')}
+function openAuth(){$('#authModal').classList.remove('is-hidden');$('#controlToken').value=token;$('#controlToken').focus()}
+function closeAuth(){$('#authModal').classList.add('is-hidden')}
 async function editSetup(){if(state._web.token_required&&!token){openAuth();toast('Enter the control token first.','error');return}const button=$('#setupButton');button.disabled=true;button.textContent='Opening…';try{const response=await fetch('/api/portal/setup',{method:'POST',headers:{...(token?{'X-Graber-Control-Token':token}:{})}});const text=await response.text();if(!response.ok)throw new Error(text||'Setup is unavailable');sessionStorage.setItem('graberSetupToken',token);window.location.replace('/')}catch(error){toast(error.message,'error',6000);button.disabled=false;button.textContent='Edit setup'}}
-$('#setupButton').addEventListener('click',editSetup);$('#authButton').addEventListener('click',openAuth);$('#controlAuthForm').addEventListener('submit',event=>{event.preventDefault();token=$('#controlToken').value.trim();sessionStorage.setItem('graberControlToken',token);closeAuth();render();toast('Control access ready.')});$$('[data-close-modal]').forEach(button=>button.addEventListener('click',closeAuth));$('#blindSearch').addEventListener('input',renderBlinds);refresh();setInterval(refresh,3000);
+
+$('#setupButton').addEventListener('click',editSetup);
+$('#authButton').addEventListener('click',openAuth);
+$('#controlAuthForm').addEventListener('submit',event=>{event.preventDefault();token=$('#controlToken').value.trim();sessionStorage.setItem('graberControlToken',token);closeAuth();render();toast('Control access ready.')});
+$$('[data-close-modal]').forEach(button=>button.addEventListener('click',closeAuth));
+$('#blindSearch').addEventListener('input',renderBlinds);
+refresh();
+setInterval(refresh,3000);

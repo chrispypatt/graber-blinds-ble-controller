@@ -262,6 +262,52 @@ class BlindController:
                     await self._drop_session()
             raise CommandFailure(f"preparation failed: {last_error}")
 
+    async def refresh_status(self) -> PositionState:
+        """Read current rails and battery through one bounded, non-movement session."""
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("blind controller is shutting down")
+            if self._session and not self._session.connection.connected:
+                await self._drop_session()
+            candidates = [self._session.adapter] if self._session else await self._adapters.candidates(self.config)
+            last_error: BaseException | None = None
+            for runtime in candidates:
+                try:
+                    session, _ = await self._ensure_session(runtime)
+                    bottom = await asyncio.wait_for(
+                        session.connection.read(BOTTOM_POSITION_CHARACTERISTIC),
+                        self._retry.gatt_timeout_s,
+                    )
+                    self._update_position(Rail.BOTTOM, position_from_notification(bottom))
+                    if self.config.dual_rail:
+                        top = await asyncio.wait_for(
+                            session.connection.read(TOP_POSITION_CHARACTERISTIC),
+                            self._retry.gatt_timeout_s,
+                        )
+                        self._update_position(Rail.TOP, position_from_notification(top))
+                    try:
+                        raw = await asyncio.wait_for(
+                            session.connection.read(BATTERY_CHARACTERISTIC),
+                            self._retry.gatt_timeout_s,
+                        )
+                        self.state.battery = battery_from_read(raw)
+                        self._last_battery_read = time.time()
+                        self._state_listener(self.config.id, self.state)
+                        self._emit("battery_read", value=self.state.battery, source="status_refresh")
+                    except Exception as exc:
+                        self._emit("battery_read_failed", source="status_refresh",
+                                   error=f"{type(exc).__name__}: {exc}")
+                    session.last_used = time.monotonic()
+                    self._schedule_close(session)
+                    self._emit("status_refreshed", adapter_id=runtime.config.id,
+                               battery_available=self.state.battery is not None)
+                    return self.state
+                except Exception as exc:
+                    last_error = exc
+                    self._adapters.record_failure(runtime, exc)
+                    await self._drop_session()
+            raise CommandFailure(f"status refresh failed: {last_error}")
+
     async def _ensure_session(self, runtime: AdapterRuntime, command_id: str | None = None,
                               attempt: int | None = None) -> tuple[_Session, dict[str, float]]:
         if self._session and self._session.connection.connected:

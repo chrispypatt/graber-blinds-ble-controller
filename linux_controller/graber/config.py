@@ -47,7 +47,7 @@ class BlindConfig:
     access_code: str = field(repr=False)
     preferred_adapter: str | None = None
     fallback_adapters: tuple[str, ...] = ()
-    battery_interval_s: float = 21600.0
+    battery_interval_s: float = 3600.0
 
 
 @dataclass(frozen=True)
@@ -149,7 +149,7 @@ def load_config(config_path: str | Path, secrets_path: str | Path) -> Controller
             access_code=code,
             preferred_adapter=item.get("preferred_adapter"),
             fallback_adapters=tuple(item.get("fallback_adapters", ())),
-            battery_interval_s=float(item.get("battery_interval_s", 21600)),
+            battery_interval_s=float(item.get("battery_interval_s", 3600)),
         ))
     groups = tuple(
         GroupConfig(
@@ -194,6 +194,8 @@ def _validate(config: ControllerConfig) -> None:
         if adapter.max_connections < 1 or adapter.max_cold_connections < 1:
             raise ConfigError(f"adapter {adapter.id} limits must be positive")
     for blind in config.blinds:
+        if blind.battery_interval_s <= 0:
+            raise ConfigError(f"blind {blind.id} battery_interval_s must be positive")
         choices = ({blind.preferred_adapter} if blind.preferred_adapter else set()) | set(blind.fallback_adapters)
         if not choices <= adapter_ids:
             raise ConfigError(f"blind {blind.id} references unknown adapter(s): {sorted(choices - adapter_ids)}")

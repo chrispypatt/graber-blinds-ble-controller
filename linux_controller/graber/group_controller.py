@@ -70,11 +70,27 @@ class Controller:
     def diagnostics_for(self, blind_id: str) -> dict[str, object]:
         return dict(self._diagnostics[blind_id])
 
+    async def refresh_status(self, target_id: str):
+        if target_id in self.dispatchers:
+            state = await self.dispatchers[target_id].blind.refresh_status()
+        elif target_id in self.groups:
+            raise ValueError("status refresh is available only for individual blinds")
+        else:
+            raise KeyError(f"unknown blind {target_id}")
+        return {
+            "bottom": state.bottom,
+            "top": (raw_to_ha_position(Rail.TOP, state.top) if state.top is not None else None),
+            "battery": state.battery,
+            "rssi": state.rssi,
+            "updated_at": state.updated_at,
+        }
+
     def _record_result(self, result: CommandResult) -> None:
         diagnostic = self._diagnostics[result.blind_id]
         diagnostic["last_command_status"] = result.outcome.value
         diagnostic["retry_count"] = int(diagnostic["retry_count"]) + max(0, result.attempts - 1)
-        if result.outcome in {Outcome.FAILED, Outcome.COMPLETION_UNCONFIRMED}:
+        superseded = bool(result.error and result.error.startswith("superseded by stop command"))
+        if result.outcome in {Outcome.FAILED, Outcome.COMPLETION_UNCONFIRMED} and not superseded:
             diagnostic["connection_failures"] = int(diagnostic["connection_failures"]) + (
                 1 if result.connect_ms is None else 0
             )
@@ -82,16 +98,26 @@ class Controller:
             self._result_listener(result.blind_id, dict(diagnostic))
 
     async def submit_command(self, target_id: str, action: str, position: int | None = None,
-                             command_id: str | None = None, source: str = "internal") -> CommandResult | GroupResult:
+                             command_id: str | None = None, source: str = "internal",
+                             target_type: str | None = None) -> CommandResult | GroupResult:
+        if target_type not in {None, "blind", "group"}:
+            raise ValueError(f"invalid target type {target_type!r}")
         command_id = command_id or uuid.uuid4().hex
         kind, rail, raw_position = parse_action(action, position)
-        if target_id in self.dispatchers:
+        use_blind = target_type == "blind" or (
+            target_type is None and target_id in self.dispatchers
+        )
+        if use_blind:
+            if target_id not in self.dispatchers:
+                raise KeyError(f"unknown blind {target_id}")
             result = await self.dispatchers[target_id].submit(
                 BlindCommand(command_id, kind, rail, raw_position, time.time())
             )
             self._record_result(result)
             return result
         if target_id not in self.groups:
+            if target_type == "group":
+                raise KeyError(f"unknown group {target_id}")
             raise KeyError(f"unknown blind/group {target_id}")
         result = await self._group(self.groups[target_id], command_id, kind, rail, raw_position)
         for member_result in result.results.values():
@@ -103,7 +129,9 @@ class Controller:
         members = [item for item in group.members if item in self.dispatchers]
         preparation_errors: dict[str, str] = {}
         ready = list(members)
-        if group.mode == "synchronized":
+        # STOP is an interrupt, not a synchronized movement. Preparing every
+        # member first would delay it behind the operations it must supersede.
+        if group.mode == "synchronized" and kind is not CommandKind.STOP:
             async def prepare(blind_id: str) -> None:
                 try:
                     await self.dispatchers[blind_id].blind.prepare()

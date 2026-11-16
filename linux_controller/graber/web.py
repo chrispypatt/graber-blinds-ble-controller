@@ -15,6 +15,8 @@ from typing import Any, Mapping, Protocol
 class WebController(Protocol):
     async def snapshot(self) -> Mapping[str, Any]: ...
 
+    async def refresh_status(self, target_id: str) -> Any: ...
+
     async def submit_command(
         self,
         target_id: str,
@@ -23,6 +25,7 @@ class WebController(Protocol):
         position: int | None = None,
         command_id: str,
         source: str,
+        target_type: str | None = None,
     ) -> Any: ...
 
 
@@ -93,9 +96,30 @@ class WebControlService:
         target_id: str,
         body: Mapping[str, Any],
         *,
+        target_type: str,
         supplied_token: str | None = None,
     ) -> Mapping[str, Any]:
+        if target_type not in {"blind", "group"}:
+            raise WebRequestError("invalid target type")
         action = str(body.get("action", "")).lower()
+        if action == "refresh_status":
+            if self.settings.control_token is None or not secrets.compare_digest(
+                supplied_token or "", self.settings.control_token
+            ):
+                raise WebRequestError("invalid control token", 403)
+            if target_type != "blind":
+                raise WebRequestError(
+                    "status refresh is available only for individual blinds", 400
+                )
+            try:
+                result = self.controller.refresh_status(target_id)
+                if inspect.isawaitable(result):
+                    result = await result
+            except ValueError as exc:
+                raise WebRequestError(str(exc), 400) from exc
+            except KeyError as exc:
+                raise WebRequestError(str(exc), 404) from exc
+            return {"accepted": True, "result": _json_value(result)}
         if action not in MOVEMENT_ACTIONS:
             raise WebRequestError("unsupported action")
         if not self.settings.live_controls:
@@ -124,9 +148,15 @@ class WebControlService:
             position=position,
             command_id=command_id,
             source="web",
+            target_type=target_type,
         )
-        if inspect.isawaitable(result):
-            result = await result
+        try:
+            if inspect.isawaitable(result):
+                result = await result
+        except KeyError as exc:
+            raise WebRequestError(str(exc), 404) from exc
+        except ValueError as exc:
+            raise WebRequestError(str(exc), 400) from exc
         return {"accepted": True, "command_id": command_id, "result": _json_value(result)}
 
 
@@ -182,6 +212,7 @@ def create_app(controller: WebController, settings: WebSettings | None = None) -
             result = await service.dispatch(
                 request.match_info["target_id"],
                 body,
+                target_type=("blind" if request.match_info["target_type"] == "blinds" else "group"),
                 supplied_token=request.headers.get("X-Graber-Control-Token"),
             )
             return web.json_response(result, status=202)
@@ -196,7 +227,7 @@ def create_app(controller: WebController, settings: WebSettings | None = None) -
     app.router.add_get("/assets/app.css", css)
     app.router.add_get("/assets/control.js", js)
     app.router.add_get("/api/state", api_state)
-    app.router.add_post("/api/targets/{target_id}/commands", api_command)
+    app.router.add_post("/api/{target_type:blinds|groups}/{target_id}/commands", api_command)
     return app
 
 

@@ -6,7 +6,7 @@ from graber.ble_transport import DiscoveredDevice
 from graber.blind import BlindCommand, BlindController, Outcome
 from graber.config import AdapterConfig, BlindConfig, RetryConfig
 from graber.protocol import (
-    AUTH_CHARACTERISTIC, BOTTOM_POSITION_CHARACTERISTIC, BOTTOM_TARGET_CHARACTERISTIC,
+    AUTH_CHARACTERISTIC, BATTERY_CHARACTERISTIC, BOTTOM_POSITION_CHARACTERISTIC, BOTTOM_TARGET_CHARACTERISTIC,
     TOP_POSITION_CHARACTERISTIC, CommandKind, Rail,
 )
 
@@ -168,5 +168,34 @@ def test_favorite_requires_observed_movement_not_only_fresh_reads():
         result = await blind.execute(BlindCommand("favorite", CommandKind.FAVORITE))
         assert result.outcome is Outcome.COMPLETION_UNCONFIRMED
         assert not result.movement_observed
+        await blind.close()
+    asyncio.run(scenario())
+
+
+def test_passive_advertisement_updates_positions_without_connecting():
+    connection = FakeConnection()
+    blind = make_controller(connection, dual=True)
+    blind.observe_advertisement(DiscoveredDevice(
+        object(), "11:22:33:44:55:66", "RRBZ_TEST", -48,
+        {1: b"\x00\x00\x1f\x47"},
+    ))
+    assert blind.state.bottom == 31
+    assert blind.state.top == 71
+    assert blind.state.rssi == -48
+    assert blind._transport.connect_calls == 0
+
+
+def test_refresh_status_reads_rails_and_battery_without_movement_write():
+    async def scenario():
+        connection = FakeConnection(reads={
+            BOTTOM_POSITION_CHARACTERISTIC: b"\x1f",
+            TOP_POSITION_CHARACTERISTIC: b"\x47",
+            BATTERY_CHARACTERISTIC: b"\x58",
+        })
+        blind = make_controller(connection, dual=True)
+        state = await blind.refresh_status()
+        assert (state.bottom, state.top, state.battery) == (31, 71, 88)
+        assert connection.writes == [(AUTH_CHARACTERISTIC, b"0123456")]
+        assert blind._transport.connect_calls == 1
         await blind.close()
     asyncio.run(scenario())
