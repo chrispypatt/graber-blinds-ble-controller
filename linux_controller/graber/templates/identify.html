@@ -11,13 +11,10 @@
   <div class="auth-screen" id="authScreen">
     <form class="auth-card" id="authForm">
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-      <p class="eyebrow">Private setup</p>
-      <h1>Welcome to Graber Control</h1>
-      <p>Enter the setup key stored on this Raspberry Pi. It stays in this browser tab only.</p>
+      <h1>Shade setup</h1>
       <label class="field"><span>Setup key</span><input id="tokenInput" type="password" autocomplete="off" autofocus required placeholder="Paste setup key"></label>
       <button class="button primary wide" type="submit">Unlock setup</button>
       <p class="form-error" id="authError" role="alert"></p>
-      <p class="microcopy">Local access only · Credentials are never shown in the browser</p>
     </form>
   </div>
   <div class="app-shell is-hidden" id="appShell">
@@ -27,27 +24,24 @@
     </header>
     <main class="page-wrap">
       <section class="hero setup-hero">
-        <div><p class="eyebrow">Guided setup</p><h1>Find every shade. Name it once.</h1><p class="hero-copy">Scan both Bluetooth adapters, safely jog a shade to identify it, then assign its room and hardware type.</p></div>
+        <div><h1>Set up shades</h1></div>
         <button class="button primary scan-button" id="scanButton" type="button"><span class="button-icon">⌁</span><span>Scan for shades</span></button>
       </section>
-      <ol class="stepper" aria-label="Setup progress">
-        <li class="active"><span>1</span><div><strong>Discover</strong><small>Find nearby shades</small></div></li><li><span>2</span><div><strong>Identify</strong><small>Use a safe jog</small></div></li><li><span>3</span><div><strong>Configure</strong><small>Name and assign</small></div></li><li><span>4</span><div><strong>Finish</strong><small>Review and export</small></div></li>
-      </ol>
       <section class="stats-grid" aria-label="Setup summary">
-        <article class="stat-card"><span class="stat-icon signal">⌁</span><div><strong id="foundCount">0</strong><small>shades found</small></div></article><article class="stat-card"><span class="stat-icon check">✓</span><div><strong id="configuredCount">0</strong><small>configured</small></div></article><article class="stat-card"><span class="stat-icon key">◆</span><div><strong id="credentialCount">0</strong><small>credentials ready</small></div></article><article class="stat-card"><span class="stat-icon radio">◉</span><div><strong id="adapterCount">0</strong><small>adapters online</small></div></article>
+        <article class="stat-card"><span class="stat-icon signal">⌁</span><div><strong id="foundCount">0</strong><small>shades</small></div></article><article class="stat-card"><span class="stat-icon check">✓</span><div><strong id="configuredCount">0</strong><small>configured</small></div></article><article class="stat-card"><span class="stat-icon radio">◉</span><div><strong id="adapterCount">0</strong><small>adapters</small></div></article>
       </section>
       <section class="content-section">
         <div class="section-heading split">
-          <div><p class="eyebrow">Discovered devices</p><h2>Configure your shades</h2><p id="deviceSummary">Run a scan to begin.</p></div>
+          <div><h2>Shades</h2><p id="deviceSummary">Run a scan to begin.</p></div>
           <div class="toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="searchInput" type="search" placeholder="Search shades" aria-label="Search shades"></label><label class="select-wrap"><span class="sr-only">Filter devices</span><select id="filterSelect"><option value="all">All shades</option><option value="needs_setup">Needs setup</option><option value="configured">Configured</option><option value="included">Included in export</option></select></label><details class="scan-settings"><summary>Scan settings</summary><label class="field compact-field"><span>Duration</span><input id="scanSeconds" type="number" value="12" min="3" max="60"><em>seconds</em></label></details></div>
         </div>
-        <div class="empty-state" id="emptyState"><div class="empty-window" aria-hidden="true"><span></span></div><h3>No shades scanned yet</h3><p>Both external adapters are ready. Start a scan to find nearby Graber motors.</p><button class="button primary" id="emptyScanButton" type="button">Start first scan</button></div>
+        <div class="empty-state" id="emptyState"><div class="empty-window" aria-hidden="true"><span></span></div><h3>No shades found</h3><button class="button primary" id="emptyScanButton" type="button">Scan for shades</button></div>
         <div class="device-grid" id="deviceGrid" aria-live="polite"></div>
       </section>
     </main>
-    <footer class="review-bar" id="reviewBar"><div><strong id="reviewTitle">Nothing ready to export</strong><span id="reviewCopy">Configure and include at least one shade.</span></div><button class="button primary" id="exportButton" type="button" disabled>Review &amp; export</button></footer>
+    <footer class="review-bar" id="reviewBar"><div><strong id="reviewTitle">Nothing to export</strong><span id="reviewCopy">0 configured</span></div><button class="button primary" id="exportButton" type="button" disabled>Review &amp; export</button></footer>
   </div>
-  <div class="modal-backdrop is-hidden" id="exportModal" role="dialog" aria-modal="true" aria-labelledby="exportTitle"><section class="modal-card"><button class="icon-button modal-close" data-close-modal aria-label="Close">×</button><p class="eyebrow">Final review</p><h2 id="exportTitle">Export controller configuration</h2><p>The Raspberry Pi will write a public topology file and a separate mode-0600 secrets file.</p><div class="review-list" id="exportReview"></div><div class="modal-actions"><button class="button secondary" data-close-modal type="button">Keep editing</button><button class="button primary" id="confirmExport" type="button">Export configuration</button></div></section></div>
+  <div class="modal-backdrop is-hidden" id="exportModal" role="dialog" aria-modal="true" aria-labelledby="exportTitle"><section class="modal-card"><button class="icon-button modal-close" data-close-modal aria-label="Close">×</button><h2 id="exportTitle">Review export</h2><div class="review-list" id="exportReview"></div><div class="modal-actions"><button class="button secondary" data-close-modal type="button">Back</button><button class="button primary" id="confirmExport" type="button">Export</button></div></section></div>
   <div class="toast-region" id="toasts" aria-live="polite"></div>
   <script src="/assets/setup.js" defer></script>
 </body>
