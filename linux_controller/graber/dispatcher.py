@@ -7,6 +7,7 @@ import time
 from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import Callable
 
 from .blind import BlindCommand, BlindController, CommandResult, Outcome
 from .protocol import CommandKind
@@ -34,6 +35,14 @@ class BlindDispatcher:
         self._generation = 0
         self._active_item: _Queued | None = None
         self._active_task: asyncio.Task[CommandResult] | None = None
+        self._lifecycle_listener: Callable[[str, str, str], None] | None = None
+
+    def set_lifecycle_listener(self, listener: Callable[[str, str, str], None]) -> None:
+        self._lifecycle_listener = listener
+
+    def _notify_lifecycle(self, status: str, command_id: str) -> None:
+        if self._lifecycle_listener is not None:
+            self._lifecycle_listener(self.blind.config.id, status, command_id)
 
     def start(self) -> None:
         if not self._worker:
@@ -60,6 +69,7 @@ class BlindDispatcher:
                         self._active_task.cancel()
                 try:
                     self._queue.put_nowait(_Queued(command, future, self._generation))
+                    self._notify_lifecycle("queued", command.id)
                 except asyncio.QueueFull:
                     self._results.pop(command.id, None)
                     raise QueueFull(f"queue full for {self.blind.config.id}")
@@ -101,6 +111,7 @@ class BlindDispatcher:
                         result = self._superseded_result(item, "newer-stop")
                     else:
                         self._active_item = item
+                        self._notify_lifecycle("running", item.command.id)
                         self._active_task = asyncio.create_task(
                             self.blind.execute(item.command),
                             name=f"blind-execute-{self.blind.config.id}",

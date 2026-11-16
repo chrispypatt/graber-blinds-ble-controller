@@ -25,6 +25,21 @@ LOG = logging.getLogger("graber")
 MINIMUM_BATTERY_REFRESH_S = 60.0
 
 
+def publish_command_lifecycle(
+    controller: Controller, event: str, fields: dict[str, object]
+) -> None:
+    """Translate BLE write telemetry into user-visible command progress."""
+    if event != "gatt_write_acknowledged":
+        return
+    blind_id = fields.get("blind_id")
+    command_id = fields.get("command_id")
+    if not isinstance(blind_id, str) or not isinstance(command_id, str):
+        return
+    controller.record_lifecycle(blind_id, "write_acknowledged", command_id)
+    if fields.get("step") == fields.get("steps"):
+        controller.record_lifecycle(blind_id, "awaiting_feedback", command_id)
+
+
 def telemetry(event: str, fields: dict[str, object]) -> None:
     LOG.info("%s %s", event, json.dumps(fields, sort_keys=True, default=str))
 
@@ -58,10 +73,14 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
 
     config = load_config(config_path, secrets_path)
     metrics = JsonlMetricsWriter(config.metrics_path, config.metrics_max_bytes) if config.metrics_path else None
+    controller_ref: dict[str, Controller] = {}
     def service_telemetry(event: str, fields: dict[str, object]) -> None:
         telemetry(event, fields)
         if metrics:
             metrics.record(event, fields)
+        controller = controller_ref.get("controller")
+        if controller is not None:
+            publish_command_lifecycle(controller, event, fields)
     manager = AdapterManager(config.adapters, resolve_configured_adapters)
     await manager.refresh()
     transport = BleakTransport()
@@ -76,6 +95,7 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
                                 state_listener=state_changed)
         dispatchers[blind_config.id] = BlindDispatcher(blind)
     controller = Controller(dispatchers, config.groups, manager.health)
+    controller_ref["controller"] = controller
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in (signal.SIGINT, signal.SIGTERM):

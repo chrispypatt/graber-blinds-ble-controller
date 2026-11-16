@@ -1,6 +1,6 @@
 import asyncio
 
-from graber.main import refresh_battery_periodically
+from graber.main import publish_command_lifecycle, refresh_battery_periodically
 
 
 class FakeBlind:
@@ -112,3 +112,34 @@ def test_cancellation_interrupts_in_flight_refresh():
         await cancel_task(task)
         assert blind.cancelled
     asyncio.run(scenario())
+
+
+class FakeController:
+    def __init__(self):
+        self.events = []
+
+    def record_lifecycle(self, blind_id, status, command_id):
+        self.events.append((blind_id, status, command_id))
+
+
+def test_final_write_ack_transitions_to_awaiting_feedback():
+    controller = FakeController()
+    publish_command_lifecycle(controller, "gatt_write_acknowledged", {
+        "blind_id": "dining_left",
+        "command_id": "move-1",
+        "step": 2,
+        "steps": 2,
+    })
+    assert controller.events == [
+        ("dining_left", "write_acknowledged", "move-1"),
+        ("dining_left", "awaiting_feedback", "move-1"),
+    ]
+
+
+def test_non_write_telemetry_does_not_change_command_lifecycle():
+    controller = FakeController()
+    publish_command_lifecycle(controller, "movement_observed", {
+        "blind_id": "dining_left",
+        "command_id": "move-1",
+    })
+    assert controller.events == []

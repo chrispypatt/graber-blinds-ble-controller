@@ -58,17 +58,34 @@ class Controller:
         self.dispatchers = dispatchers
         self.groups = {item.id: item for item in groups}
         self._diagnostics = {
-            blind_id: {"last_command_status": "idle", "connection_failures": 0, "retry_count": 0}
+            blind_id: {
+                "last_command_status": "idle",
+                "active_command_id": None,
+                "connection_failures": 0,
+                "retry_count": 0,
+            }
             for blind_id in dispatchers
         }
         self._result_listener: Callable[[str, dict[str, object]], None] | None = None
         self._adapter_health_provider = adapter_health_provider or (lambda: {})
+        for dispatcher in self.dispatchers.values():
+            setter = getattr(dispatcher, "set_lifecycle_listener", None)
+            if setter is not None:
+                setter(self.record_lifecycle)
 
     def set_result_listener(self, listener: Callable[[str, dict[str, object]], None]) -> None:
         self._result_listener = listener
 
     def diagnostics_for(self, blind_id: str) -> dict[str, object]:
         return dict(self._diagnostics[blind_id])
+
+    def record_lifecycle(self, blind_id: str, status: str, command_id: str) -> None:
+        """Publish non-terminal command progress without changing retry semantics."""
+        diagnostic = self._diagnostics[blind_id]
+        diagnostic["last_command_status"] = status
+        diagnostic["active_command_id"] = command_id
+        if self._result_listener:
+            self._result_listener(blind_id, dict(diagnostic))
 
     async def refresh_status(self, target_id: str):
         if target_id in self.dispatchers:
@@ -87,7 +104,13 @@ class Controller:
 
     def _record_result(self, result: CommandResult) -> None:
         diagnostic = self._diagnostics[result.blind_id]
-        diagnostic["last_command_status"] = result.outcome.value
+        # A STOP can supersede an active command and become the new active
+        # command before the cancelled command's waiter records its result.
+        # Keep that newer lifecycle visible instead of restoring stale state.
+        active_command_id = diagnostic["active_command_id"]
+        if active_command_id is None or active_command_id == result.command_id:
+            diagnostic["last_command_status"] = result.outcome.value
+            diagnostic["active_command_id"] = None
         diagnostic["retry_count"] = int(diagnostic["retry_count"]) + max(0, result.attempts - 1)
         superseded = bool(result.error and result.error.startswith("superseded by stop command"))
         if result.outcome in {Outcome.FAILED, Outcome.COMPLETION_UNCONFIRMED} and not superseded:

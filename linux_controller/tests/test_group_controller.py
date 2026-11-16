@@ -35,6 +35,10 @@ class FakeDispatcher:
         self.blind = FakeBlind(blind_id, prepare_error)
         self.outcome = outcome
         self.commands = []
+        self.lifecycle_listener = None
+
+    def set_lifecycle_listener(self, listener):
+        self.lifecycle_listener = listener
 
     async def submit(self, command):
         self.commands.append(command)
@@ -53,6 +57,24 @@ def test_best_effort_failure_does_not_block_other_blinds():
         assert result.results["a"].outcome is Outcome.FAILED
         assert result.results["b"].outcome is Outcome.COMPLETED
     asyncio.run(scenario())
+
+
+def test_active_lifecycle_replaces_stale_terminal_status_and_clears_on_result():
+    dispatcher = FakeDispatcher("a")
+    controller = Controller({"a": dispatcher}, ())
+    updates = []
+    controller.set_result_listener(lambda blind_id, value: updates.append((blind_id, value)))
+
+    dispatcher.lifecycle_listener("a", "queued", "next-command")
+    assert controller.diagnostics_for("a")["last_command_status"] == "queued"
+    assert controller.diagnostics_for("a")["active_command_id"] == "next-command"
+
+    dispatcher.lifecycle_listener("a", "awaiting_feedback", "next-command")
+    controller._record_result(CommandResult("next-command", "a", Outcome.COMPLETED))
+    assert [value["last_command_status"] for _, value in updates] == [
+        "queued", "awaiting_feedback", "completed",
+    ]
+    assert controller.diagnostics_for("a")["active_command_id"] is None
 
 
 def test_synchronized_release_ready_omits_failed_preparation():
