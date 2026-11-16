@@ -48,6 +48,7 @@ def test_name_generates_id_and_group_must_come_from_catalog(tmp_path: Path):
     device = session.devices[key]
     assert device.id == "living_east"
     assert device.group == "dining"
+    assert device.configured is True
     try:
         session.configure(key, {"group": "invented_group"})
     except ValueError as exc:
@@ -210,6 +211,9 @@ def test_web_requires_token_and_never_jogs_without_launch_gate(tmp_path: Path):
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
+            asset = await client.get("/assets/setup.js")
+            assert asset.status == 200
+            assert "no-store" in asset.headers["Cache-Control"]
             assert (await client.get("/api/state")).status == 403
             assert (await client.get(
                 "/api/state", headers={"X-Graber-Control-Token": "0123456789abcdef"}

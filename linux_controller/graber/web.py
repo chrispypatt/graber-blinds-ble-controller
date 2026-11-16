@@ -79,7 +79,14 @@ class WebControlService:
 
     async def snapshot(self) -> Mapping[str, Any]:
         value = self.controller.snapshot()
-        return await value if inspect.isawaitable(value) else value
+        snapshot = await value if inspect.isawaitable(value) else value
+        return {
+            **snapshot,
+            "_web": {
+                "live_controls": self.settings.live_controls,
+                "token_required": self.settings.control_token is not None,
+            },
+        }
 
     async def dispatch(
         self,
@@ -143,16 +150,28 @@ def create_app(controller: WebController, settings: WebSettings | None = None) -
         raise RuntimeError("the web interface requires aiohttp") from exc
 
     service = WebControlService(controller, settings)
-    template = (Path(__file__).parent / "templates" / "index.html").read_text(encoding="utf-8")
+    package_root = Path(__file__).parent
+    template = (package_root / "templates" / "index.html").read_text(encoding="utf-8")
+    stylesheet = (package_root / "static" / "app.css").read_text(encoding="utf-8")
+    javascript = (package_root / "static" / "control.js").read_text(encoding="utf-8")
 
     @web.middleware
     async def local_network_only(request: Any, handler: Any) -> Any:
         if not service.client_allowed(request.remote):
             return web.json_response({"error": "client is outside allowed networks"}, status=403)
-        return await handler(request)
+        response = await handler(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
     async def index(_request: Any) -> Any:
         return web.Response(text=template, content_type="text/html")
+
+    async def css(_request: Any) -> Any:
+        return web.Response(text=stylesheet, content_type="text/css")
+
+    async def js(_request: Any) -> Any:
+        return web.Response(text=javascript, content_type="application/javascript")
 
     async def api_state(_request: Any) -> Any:
         return web.json_response(await service.snapshot())
@@ -172,8 +191,10 @@ def create_app(controller: WebController, settings: WebSettings | None = None) -
             return web.json_response({"error": str(exc)}, status=exc.status)
 
     app = web.Application(middlewares=[local_network_only])
-    app["graber_web_settings"] = service.settings
+    app[web.AppKey("graber_web_settings", WebSettings)] = service.settings
     app.router.add_get("/", index)
+    app.router.add_get("/assets/app.css", css)
+    app.router.add_get("/assets/control.js", js)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/targets/{target_id}/commands", api_command)
     return app

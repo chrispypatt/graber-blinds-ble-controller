@@ -89,6 +89,7 @@ class DeviceSetup:
     preferred_adapter: str
     group: str = ""
     enabled: bool = True
+    configured: bool = False
     access_code: str | None = field(default=None, repr=False)
 
     def browser_dict(self, allow_code_read: bool) -> dict[str, Any]:
@@ -109,6 +110,7 @@ class DeviceSetup:
             "preferred_adapter": self.preferred_adapter,
             "group": self.group,
             "enabled": self.enabled,
+            "configured": self.configured,
             "bottom_raw": self.observation.bottom_raw,
             "top_raw": self.observation.top_raw,
             "bottom_position": bottom_position,
@@ -157,6 +159,7 @@ class SetupSession:
                     self.devices[key] = DeviceSetup(
                         motor, default_id, motor.name, False, adapter_id,
                         group="",
+                        configured=False,
                         access_code=self.known_credentials.get(motor.address.upper()),
                     )
 
@@ -198,6 +201,7 @@ class SetupSession:
             raise ValueError("unknown group selection")
         device.group = requested_group
         device.enabled = bool(body.get("enabled", device.enabled))
+        device.configured = True
         code = str(body.get("access_code", ""))
         if code:
             if len(code) != 7 or not code.isascii() or not code.isdigit():
@@ -338,7 +342,10 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
                jogger: Callable[[SetupSession, str], Awaitable[dict[str, Any]]] = jog_device) -> Any:
     from aiohttp import web
     networks = tuple(ipaddress.ip_network(value) for value in settings.allowed_networks)
-    template = (Path(__file__).parent / "templates" / "identify.html").read_text(encoding="utf-8")
+    package_root = Path(__file__).parent
+    template = (package_root / "templates" / "identify.html").read_text(encoding="utf-8")
+    stylesheet = (package_root / "static" / "app.css").read_text(encoding="utf-8")
+    javascript = (package_root / "static" / "setup.js").read_text(encoding="utf-8")
 
     @web.middleware
     async def guard(request: Any, handler: Any) -> Any:
@@ -365,6 +372,12 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
     async def index(_request: Any) -> Any:
         return web.Response(text=template, content_type="text/html")
 
+    async def css(_request: Any) -> Any:
+        return web.Response(text=stylesheet, content_type="text/css")
+
+    async def js(_request: Any) -> Any:
+        return web.Response(text=javascript, content_type="application/javascript")
+
     async def state(_request: Any) -> Any:
         authorize(_request)
         return web.json_response(session.state(allow_jog=settings.allow_jog))
@@ -377,8 +390,12 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
 
     async def configure(request: Any) -> Any:
         authorize(request)
-        session.configure(request.match_info["key"], await request.json())
-        return web.json_response({"saved": True})
+        key = request.match_info["key"]
+        session.configure(key, await request.json())
+        return web.json_response({
+            "saved": True,
+            "device": session.devices[key].browser_dict(session.allow_code_read),
+        })
 
     async def inspect(request: Any) -> Any:
         authorize(request)
@@ -412,6 +429,8 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
 
     app = web.Application(middlewares=[guard])
     app.router.add_get("/", index)
+    app.router.add_get("/assets/app.css", css)
+    app.router.add_get("/assets/setup.js", js)
     app.router.add_get("/api/state", state)
     app.router.add_post("/api/scan", start_scan)
     app.router.add_post("/api/devices/{key}/configure", configure)

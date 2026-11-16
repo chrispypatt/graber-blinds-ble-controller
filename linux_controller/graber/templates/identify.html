@@ -1,20 +1,54 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Graber Identification</title><style>
-body{font-family:system-ui,sans-serif;max-width:80rem;margin:auto;padding:1rem}header{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap}
-#devices{display:grid;grid-template-columns:repeat(auto-fit,minmax(20rem,1fr));gap:1rem}.card{border:1px solid #8888;border-radius:.7rem;padding:1rem}
-label{display:block;margin:.45rem 0}input,select,button{padding:.45rem}input[type=text],input[type=password]{width:95%}.warn{color:#b44}.muted{opacity:.7}
-</style></head><body><h1>Graber identification & setup</h1>
-<p class="warn">Jogging moves a real blind. Supervise the room and enable it only for identification.</p>
-<header><input id="token" type="password" placeholder="Setup token" autocomplete="off"><input id="seconds" type="number" value="12" min="1" max="300"><button onclick="scan()">Scan adapters</button><button onclick="exportConfig()">Export configuration</button><span id="status"></span></header>
-<main id="devices"></main><script>
-const devices=document.getElementById('devices'); const token=()=>document.getElementById('token').value;
-async function api(path,body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Graber-Control-Token':token()},body:JSON.stringify(body||{})});if(!r.ok)throw new Error(await r.text());return r.json()}
-async function refresh(){const r=await fetch('/api/state',{headers:{'X-Graber-Control-Token':token()}});if(!r.ok){document.getElementById('status').textContent='Enter the setup token';devices.innerHTML='';return}const s=await r.json();devices.innerHTML='';for(const d of s.devices){const e=document.createElement('section');e.className='card';const rails=d.dual_rail?`Bottom ${esc(d.bottom_position)}% · Top ${esc(d.top_position)}%`:`Position ${esc(d.bottom_position)}%`;e.innerHTML=`<h2>${esc(d.advertised_name)}</h2><p><strong>${rails}</strong> · RSSI ${esc(d.rssi_median)} dBm</p><label><input data-k="enabled" type="checkbox" ${d.enabled?'checked':''}> Include in export</label><label>Name <input data-k="name" value="${esc(d.name)}"></label><label>ID <input data-k="id" value="${esc(d.id)}" readonly></label><label>Group <select data-k="group"><option value="">No group</option>${s.groups.map(g=>`<option value="${esc(g.id)}" ${g.id===d.group?'selected':''}>${esc(g.name)}</option>`).join('')}</select></label><label>Adapter <select data-k="preferred_adapter">${s.adapters.map(a=>`<option ${a.id===d.preferred_adapter?'selected':''}>${esc(a.id)}</option>`).join('')}</select></label><label><input data-k="dual_rail" type="checkbox" ${d.dual_rail?'checked':''}> TDBU</label>${d.has_access_code?'<p>Credential loaded from private inventory</p>':`<label>Access code <input data-k="access_code" type="password" placeholder="7 digits"></label>`}${d.candidate_code_available?'<label><input data-k="use_candidate" type="checkbox"> Use read candidate code</label>':''}<button data-a="save">Save</button> ${s.allow_jog?'<button data-a="jog">Jog 5% and restore</button>':''}`;
-const nameField=e.querySelector('[data-k="name"]');const idField=e.querySelector('[data-k="id"]');nameField.addEventListener('input',()=>idField.value=slug(nameField.value));
-e.onclick=async ev=>{const a=ev.target.dataset.a;if(!a)return;if(a==='jog'&&!confirm('Move this real blind 5% and attempt to restore it?'))return;const buttons=[...document.querySelectorAll('button')];buttons.forEach(x=>x.disabled=true);if(a==='jog')document.getElementById('status').textContent='Jog in progress…';try{let result;if(a==='save'){const b={};for(const x of e.querySelectorAll('[data-k]'))b[x.dataset.k]=x.type==='checkbox'?x.checked:x.value;result=await api(`/api/devices/${d.key}/configure`,b)}else result=await api(`/api/devices/${d.key}/${a}`);if(a==='jog')alert(result.restored?'Jog completed and original position restored':`Jog finished but restoration was not confirmed (${result.restore_status||result.status})`);await refresh()}catch(x){alert(x.message)}finally{buttons.forEach(x=>x.disabled=false)}};devices.appendChild(e)}document.getElementById('status').textContent=s.busy?'Bluetooth operation in progress…':`${s.devices.length} found · ready`}
-async function scan(){try{await api('/api/scan',{seconds:Number(document.getElementById('seconds').value)});await refresh()}catch(e){alert(e.message)}}
-async function exportConfig(){try{const x=await api('/api/export');alert(`Wrote ${x.config} and ${x.secrets}`)}catch(e){alert(e.message)}}
-function slug(v){return String(v).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'')||'blind'}
-function esc(v){const e=document.createElement('span');e.textContent=String(v??'?');return e.innerHTML}refresh();
-</script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17211c">
+  <title>Set up shades · Graber Control</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="setup-page">
+  <div class="auth-screen" id="authScreen">
+    <form class="auth-card" id="authForm">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p class="eyebrow">Private setup</p>
+      <h1>Welcome to Graber Control</h1>
+      <p>Enter the setup key stored on this Raspberry Pi. It stays in this browser tab only.</p>
+      <label class="field"><span>Setup key</span><input id="tokenInput" type="password" autocomplete="off" autofocus required placeholder="Paste setup key"></label>
+      <button class="button primary wide" type="submit">Unlock setup</button>
+      <p class="form-error" id="authError" role="alert"></p>
+      <p class="microcopy">Local access only · Credentials are never shown in the browser</p>
+    </form>
+  </div>
+  <div class="app-shell is-hidden" id="appShell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Graber Control setup home"><span class="brand-mark small" aria-hidden="true"><span></span><span></span><span></span></span><span><strong>Graber Control</strong><small>Shade setup</small></span></a>
+      <div class="topbar-actions"><span class="status-pill" id="connectionStatus"><i></i>Connecting</span><button class="button ghost compact" id="lockButton" type="button">Lock</button></div>
+    </header>
+    <main class="page-wrap">
+      <section class="hero setup-hero">
+        <div><p class="eyebrow">Guided setup</p><h1>Find every shade. Name it once.</h1><p class="hero-copy">Scan both Bluetooth adapters, safely jog a shade to identify it, then assign its room and hardware type.</p></div>
+        <button class="button primary scan-button" id="scanButton" type="button"><span class="button-icon">⌁</span><span>Scan for shades</span></button>
+      </section>
+      <ol class="stepper" aria-label="Setup progress">
+        <li class="active"><span>1</span><div><strong>Discover</strong><small>Find nearby shades</small></div></li><li><span>2</span><div><strong>Identify</strong><small>Use a safe jog</small></div></li><li><span>3</span><div><strong>Configure</strong><small>Name and assign</small></div></li><li><span>4</span><div><strong>Finish</strong><small>Review and export</small></div></li>
+      </ol>
+      <section class="stats-grid" aria-label="Setup summary">
+        <article class="stat-card"><span class="stat-icon signal">⌁</span><div><strong id="foundCount">0</strong><small>shades found</small></div></article><article class="stat-card"><span class="stat-icon check">✓</span><div><strong id="configuredCount">0</strong><small>configured</small></div></article><article class="stat-card"><span class="stat-icon key">◆</span><div><strong id="credentialCount">0</strong><small>credentials ready</small></div></article><article class="stat-card"><span class="stat-icon radio">◉</span><div><strong id="adapterCount">0</strong><small>adapters online</small></div></article>
+      </section>
+      <section class="content-section">
+        <div class="section-heading split">
+          <div><p class="eyebrow">Discovered devices</p><h2>Configure your shades</h2><p id="deviceSummary">Run a scan to begin.</p></div>
+          <div class="toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="searchInput" type="search" placeholder="Search shades" aria-label="Search shades"></label><label class="select-wrap"><span class="sr-only">Filter devices</span><select id="filterSelect"><option value="all">All shades</option><option value="needs_setup">Needs setup</option><option value="configured">Configured</option><option value="included">Included in export</option></select></label><details class="scan-settings"><summary>Scan settings</summary><label class="field compact-field"><span>Duration</span><input id="scanSeconds" type="number" value="12" min="3" max="60"><em>seconds</em></label></details></div>
+        </div>
+        <div class="empty-state" id="emptyState"><div class="empty-window" aria-hidden="true"><span></span></div><h3>No shades scanned yet</h3><p>Both external adapters are ready. Start a scan to find nearby Graber motors.</p><button class="button primary" id="emptyScanButton" type="button">Start first scan</button></div>
+        <div class="device-grid" id="deviceGrid" aria-live="polite"></div>
+      </section>
+    </main>
+    <footer class="review-bar" id="reviewBar"><div><strong id="reviewTitle">Nothing ready to export</strong><span id="reviewCopy">Configure and include at least one shade.</span></div><button class="button primary" id="exportButton" type="button" disabled>Review &amp; export</button></footer>
+  </div>
+  <div class="modal-backdrop is-hidden" id="exportModal" role="dialog" aria-modal="true" aria-labelledby="exportTitle"><section class="modal-card"><button class="icon-button modal-close" data-close-modal aria-label="Close">×</button><p class="eyebrow">Final review</p><h2 id="exportTitle">Export controller configuration</h2><p>The Raspberry Pi will write a public topology file and a separate mode-0600 secrets file.</p><div class="review-list" id="exportReview"></div><div class="modal-actions"><button class="button secondary" data-close-modal type="button">Keep editing</button><button class="button primary" id="confirmExport" type="button">Export configuration</button></div></section></div>
+  <div class="toast-region" id="toasts" aria-live="polite"></div>
+  <script src="/assets/setup.js" defer></script>
+</body>
+</html>

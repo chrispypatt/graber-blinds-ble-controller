@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from graber.web import WebControlService, WebRequestError, WebSettings
+from graber.web import WebControlService, WebRequestError, WebSettings, create_app
 
 
 class FakeController:
@@ -69,3 +69,22 @@ def test_snapshot_is_read_only_and_available_without_live_gate():
     service = WebControlService(FakeController())
     state = asyncio.run(service.snapshot())
     assert state["blinds"]["left"]["bottom_position"] == 50
+    assert state["_web"] == {"live_controls": False, "token_required": False}
+
+
+def test_control_assets_are_served_without_caching():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def scenario():
+        client = TestClient(TestServer(create_app(FakeController())))
+        await client.start_server()
+        try:
+            stylesheet = await client.get("/assets/app.css")
+            javascript = await client.get("/assets/control.js")
+            assert stylesheet.status == javascript.status == 200
+            assert "no-store" in stylesheet.headers["Cache-Control"]
+            assert "no-store" in javascript.headers["Cache-Control"]
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
