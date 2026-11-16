@@ -56,6 +56,7 @@ class CommandResult:
     adapter_id: str | None = None
     attempts: int = 0
     received_at: float = 0.0
+    cold_queue_ms: float | None = None
     discovery_ms: float | None = None
     connect_ms: float | None = None
     auth_ms: float | None = None
@@ -172,6 +173,7 @@ class BlindController:
                                    adapter_id=runtime.config.id)
                     session, timings = await self._ensure_session(runtime, command.id, attempt)
                     connection_ready = True
+                    result.cold_queue_ms = timings.get("cold_queue_ms", result.cold_queue_ms)
                     result.discovery_ms = timings.get("discovery_ms", result.discovery_ms)
                     result.connect_ms = timings.get("connect_ms", result.connect_ms)
                     result.auth_ms = timings.get("auth_ms", result.auth_ms)
@@ -320,7 +322,13 @@ class BlindController:
         await runtime.connection_slots.acquire()
         connection: BleConnection | None = None
         try:
-            async with self._adapters.cold_connection(runtime):
+            async with self._adapters.cold_connection(runtime) as cold_queue_ms:
+                if command_id is not None:
+                    self._emit(
+                        "cold_connection_slot_acquired", command_id=command_id,
+                        attempt=attempt, adapter_id=runtime.config.id,
+                        cold_queue_ms=cold_queue_ms,
+                    )
                 discover_started = time.monotonic()
                 device = await self._transport.discover(self.config.address, runtime.resolved.device,
                                                         self._retry.connect_timeout_s)
@@ -333,7 +341,7 @@ class BlindController:
                 if command_id is not None:
                     self._emit("connection_attempt_succeeded", command_id=command_id, attempt=attempt,
                                adapter_id=runtime.config.id, discovery_ms=discovery_ms,
-                               connect_ms=connect_ms)
+                               connect_ms=connect_ms, cold_queue_ms=cold_queue_ms)
             setup_started = time.monotonic()
             await asyncio.wait_for(
                 connection.start_notify(BOTTOM_POSITION_CHARACTERISTIC, self._notification(Rail.BOTTOM)),
@@ -351,9 +359,12 @@ class BlindController:
             gatt_setup_ms = (time.monotonic() - setup_started) * 1000
             self._session = _Session(connection, runtime, time.monotonic())
             self._adapters.record_success(runtime)
-            self._emit("connection_ready", adapter_id=runtime.config.id, discovery_ms=discovery_ms,
-                       connect_ms=connect_ms, auth_ms=auth_ms, gatt_setup_ms=gatt_setup_ms)
-            return self._session, {"discovery_ms": discovery_ms, "connect_ms": connect_ms,
+            self._emit("connection_ready", command_id=command_id, attempt=attempt,
+                       adapter_id=runtime.config.id, cold_queue_ms=cold_queue_ms,
+                       discovery_ms=discovery_ms, connect_ms=connect_ms,
+                       auth_ms=auth_ms, gatt_setup_ms=gatt_setup_ms)
+            return self._session, {"cold_queue_ms": cold_queue_ms,
+                                   "discovery_ms": discovery_ms, "connect_ms": connect_ms,
                                    "auth_ms": auth_ms, "gatt_setup_ms": gatt_setup_ms}
         except BaseException:
             if connection:

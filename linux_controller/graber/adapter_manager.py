@@ -153,8 +153,11 @@ class AdapterManager:
             yield runtime.resolved
 
     @asynccontextmanager
-    async def cold_connection(self, runtime: AdapterRuntime) -> AsyncIterator[None]:
-        async with runtime.cold_slots:
+    async def cold_connection(self, runtime: AdapterRuntime) -> AsyncIterator[float]:
+        queued_at = time.monotonic()
+        await runtime.cold_slots.acquire()
+        queue_wait_ms = (time.monotonic() - queued_at) * 1000
+        try:
             # Re-check after waiting in the per-adapter queue. A health refresh
             # may have observed a USB disconnect while this work was queued.
             if runtime.resolved is None:
@@ -162,7 +165,9 @@ class AdapterManager:
             if runtime.resolved is None:
                 raise AdapterUnavailable(f"adapter {runtime.config.id} disappeared")
             runtime.stats.connection_attempts += 1
-            yield
+            yield queue_wait_ms
+        finally:
+            runtime.cold_slots.release()
 
     def record_success(self, runtime: AdapterRuntime) -> None:
         runtime.stats.connection_successes += 1

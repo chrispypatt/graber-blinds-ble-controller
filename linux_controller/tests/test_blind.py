@@ -66,7 +66,8 @@ class FakeTransport:
         return self.connection
 
 
-def make_controller(connection, *, failures=0, feedback_timeout=0.08, dual=False):
+def make_controller(connection, *, failures=0, feedback_timeout=0.08, dual=False,
+                    telemetry=None):
     adapter = AdapterConfig("external", "AA:BB:CC:DD:EE:FF", max_connections=2)
     async def resolver(_):
         return [ResolvedAdapter("external", adapter.controller_address, "hci9", "1-1.2")]
@@ -74,7 +75,10 @@ def make_controller(connection, *, failures=0, feedback_timeout=0.08, dual=False
     blind = BlindConfig("blind", "Blind", "11:22:33:44:55:66", dual, "0123456", "external")
     retry = RetryConfig(attempts=3, connect_timeout_s=0.2, gatt_timeout_s=0.2,
                         feedback_timeout_s=feedback_timeout, backoff_s=0, jitter_s=0)
-    return BlindController(blind, manager, FakeTransport(connection, failures), retry, warm_connection_s=30)
+    return BlindController(
+        blind, manager, FakeTransport(connection, failures), retry,
+        warm_connection_s=30, telemetry=telemetry,
+    )
 
 
 def test_connect_subscribe_auth_then_verified_command():
@@ -91,6 +95,30 @@ def test_connect_subscribe_auth_then_verified_command():
         assert BOTTOM_POSITION_CHARACTERISTIC in connection.notifications
         assert result.adapter_id == "external"
         await blind.close()
+    asyncio.run(scenario())
+
+
+def test_command_telemetry_reports_cold_queue_wait():
+    async def scenario():
+        events = []
+        blind = make_controller(
+            FakeConnection(),
+            telemetry=lambda event, fields: events.append((event, fields)),
+        )
+        result = await blind.execute(
+            BlindCommand("queue-timing", CommandKind.SET_POSITION, Rail.BOTTOM, 42)
+        )
+        acquired = [fields for event, fields in events
+                    if event == "cold_connection_slot_acquired"]
+        completed = [fields for event, fields in events if event == "command_completed"]
+        assert len(acquired) == 1
+        assert acquired[0]["command_id"] == "queue-timing"
+        assert acquired[0]["adapter_id"] == "external"
+        assert acquired[0]["cold_queue_ms"] >= 0
+        assert result.cold_queue_ms == acquired[0]["cold_queue_ms"]
+        assert completed[0]["cold_queue_ms"] == result.cold_queue_ms
+        await blind.close()
+
     asyncio.run(scenario())
 
 

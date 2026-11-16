@@ -60,6 +60,44 @@ def test_cold_connection_limit_is_independent_per_adapter():
     run(scenario())
 
 
+def test_cold_connection_reports_immediate_and_queued_wait():
+    configs = (AdapterConfig("a", "AA:00:00:00:00:01", max_cold_connections=1),)
+
+    async def resolver(_):
+        return [ResolvedAdapter("a", configs[0].controller_address, "hci7")]
+
+    manager = AdapterManager(configs, resolver)
+
+    async def scenario():
+        runtime = (await manager.candidates(
+            BlindConfig("x", "X", "11", False, "1234567")
+        ))[0]
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        waits = []
+
+        async def holder():
+            async with manager.cold_connection(runtime) as wait_ms:
+                waits.append(wait_ms)
+                entered.set()
+                await release.wait()
+
+        async def queued():
+            async with manager.cold_connection(runtime) as wait_ms:
+                waits.append(wait_ms)
+
+        first = asyncio.create_task(holder())
+        await entered.wait()
+        second = asyncio.create_task(queued())
+        await asyncio.sleep(0.02)
+        release.set()
+        await asyncio.gather(first, second)
+        assert waits[0] < 10
+        assert waits[1] >= 15
+
+    run(scenario())
+
+
 def test_loss_and_recovery_rebinds_transient_hci_name_and_updates_health():
     config = AdapterConfig("a", "AA:00:00:00:00:01")
     snapshots = [

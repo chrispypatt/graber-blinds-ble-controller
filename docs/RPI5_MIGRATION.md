@@ -74,6 +74,11 @@ Assign pilot blinds across the configured adapters as an experiment, not a
 capacity claim. Start with one blind per adapter, then increase concurrent
 sessions only when the earlier test is healthy. Best-effort group mode is the
 default: an unavailable blind reports its own failure while the others proceed.
+Keep `max_cold_connections = 1` for the first baseline, then test `2` before
+considering higher values. Compare first-attempt success, movement-start spread,
+and `cold_queue_ms`; a slow connection must not indefinitely hold unrelated
+shades behind the adapter queue. Do not increase the 30-second warm timeout to
+hide cold-start latency.
 Synchronized mode uses a bounded preparation deadline and the configured policy
 for partial preparation; no prepared connection waits indefinitely.
 
