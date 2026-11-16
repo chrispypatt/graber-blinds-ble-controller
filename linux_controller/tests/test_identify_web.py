@@ -151,6 +151,33 @@ def test_scan_can_be_cancelled_and_cleaned_up(tmp_path: Path):
     asyncio.run(scenario())
 
 
+def test_scan_survives_request_task_cancellation(tmp_path: Path):
+    session, _ = make_session(tmp_path)
+    started = asyncio.Event()
+
+    async def fake_scan_all(_seconds):
+        started.set()
+        await asyncio.Event().wait()
+
+    session.scan_all = fake_scan_all
+
+    async def scenario():
+        request_task = asyncio.create_task(session.start_scan(30))
+        await started.wait()
+        request_task.cancel()
+        try:
+            await request_task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("request task should be cancelled")
+        assert session.scan_state()["active"] is True
+        assert await session.cancel_scan() is True
+        assert session.scan_state()["active"] is False
+
+    asyncio.run(scenario())
+
+
 def test_known_credentials_reject_insecure_permissions(tmp_path: Path):
     secrets_path = tmp_path / "known-secrets.toml"
     secrets_path.write_text(

@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import stat
+import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -150,6 +151,8 @@ class SetupSession:
         self.devices: dict[str, DeviceSetup] = {}
         self.ble_lock = asyncio.Lock()
         self.scan_task: asyncio.Task[None] | None = None
+        self.scan_started_at: float | None = None
+        self.scan_duration_s: float | None = None
 
     async def scan_all(self, seconds: float = 12) -> None:
         async with self.ble_lock:
@@ -177,11 +180,18 @@ class SetupSession:
             raise ValueError("a scan is already running")
         task = asyncio.create_task(self.scan_all(seconds))
         self.scan_task = task
-        try:
-            await task
-        finally:
-            if self.scan_task is task:
-                self.scan_task = None
+        self.scan_started_at = time.monotonic()
+        self.scan_duration_s = seconds
+        task.add_done_callback(self._scan_finished)
+        await asyncio.shield(task)
+
+    def _scan_finished(self, task: asyncio.Task[None]) -> None:
+        if self.scan_task is task:
+            self.scan_task = None
+            self.scan_started_at = None
+            self.scan_duration_s = None
+        if not task.cancelled():
+            task.exception()
 
     async def cancel_scan(self) -> bool:
         task = self.scan_task
@@ -190,6 +200,16 @@ class SetupSession:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         return True
+
+    def scan_state(self) -> dict[str, Any]:
+        active = self.scan_task is not None and not self.scan_task.done()
+        duration = self.scan_duration_s or 0
+        elapsed = time.monotonic() - self.scan_started_at if active and self.scan_started_at else 0
+        return {
+            "active": active,
+            "duration_s": duration,
+            "remaining_s": max(0, duration - elapsed),
+        }
 
     def state(self, *, allow_jog: bool) -> dict[str, Any]:
         return {
@@ -207,6 +227,7 @@ class SetupSession:
                        for group_id, name in self.groups.items()],
             "allow_jog": allow_jog,
             "busy": self.ble_lock.locked(),
+            "scan": self.scan_state(),
             "allow_code_read": self.allow_code_read,
             "can_export": self.export_dir is not None,
         }
