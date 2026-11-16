@@ -1,0 +1,12 @@
+# Replace this hostname with a private DNS name that resolves to the Pi.
+graber.home.arpa {
+	tls internal
+	@outsideLan not remote_ip private_ranges
+	abort @outsideLan
+	reverse_proxy 127.0.0.1:8080
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+}

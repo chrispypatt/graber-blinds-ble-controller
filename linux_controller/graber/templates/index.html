@@ -5,7 +5,7 @@
 </head>
 <body class="control-page">
   <div class="app-shell">
-    <header class="topbar"><a class="brand" href="/" aria-label="Graber Control home"><span><strong>Graber Control</strong><small>Home dashboard</small></span></a><div class="topbar-actions"><span class="status-pill" id="controllerStatus"><i></i>Connecting</span><button class="button ghost compact" id="setupButton" type="button">Edit setup</button><button class="button ghost compact" id="authButton" type="button">Control access</button></div></header>
+    <header class="topbar"><a class="brand" href="/" aria-label="Graber Control home"><span><strong>Graber Control</strong><small>Home dashboard</small></span></a><div class="topbar-actions"><span class="status-pill" id="controllerStatus"><i></i>Connecting</span><button class="button ghost compact" id="setupButton" type="button">Edit setup</button><button class="button ghost compact" id="accountButton" type="button">Account</button></div></header>
     <main class="page-wrap">
       <section class="hero control-hero"><div><h1>Shades</h1><p class="hero-copy" id="dashboardSummary">Loading…</p></div></section>
       <div class="notice is-hidden" id="controlNotice"><span>ⓘ</span><div><strong>Controls disabled</strong></div></div>
@@ -14,7 +14,7 @@
       <section class="content-section diagnostics-section"><details><summary><span><span class="stat-icon radio">◉</span><span><strong>Bluetooth system</strong><small id="adapterSummary">Checking adapters…</small></span></span><span>View diagnostics</span></summary><div class="adapter-grid" id="adapterGrid"></div></details></section>
     </main>
   </div>
-  <div class="modal-backdrop is-hidden" id="authModal" role="dialog" aria-modal="true" aria-labelledby="authTitle"><form class="modal-card narrow" id="controlAuthForm"><button class="icon-button modal-close" data-close-modal aria-label="Close">×</button><h2 id="authTitle">Control access</h2><label class="field"><span>Control token</span><input id="controlToken" type="password" autocomplete="off" placeholder="Control token"></label><div class="modal-actions"><button class="button secondary" data-close-modal type="button">Cancel</button><button class="button primary" type="submit">Save</button></div></form></div>
+  <div class="modal-backdrop is-hidden" id="accountModal" role="dialog" aria-modal="true" aria-labelledby="accountTitle"><section class="modal-card narrow"><button class="icon-button modal-close" data-close-modal aria-label="Close">×</button><h2 id="accountTitle">Account</h2><p id="accountName"></p><form id="passwordForm"><label class="field"><span>Current password</span><input id="currentPassword" type="password" autocomplete="current-password" required></label><label class="field"><span>New password</span><input id="newPassword" type="password" autocomplete="new-password" minlength="12" required></label><label class="field"><span>Confirm password</span><input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" required></label><p class="form-error" id="accountError" role="alert"></p><div class="modal-actions split-actions"><button class="button danger" id="logoutButton" type="button">Sign out</button><button class="button primary" type="submit">Change password</button></div></form></section></div>
   <div class="toast-region" id="toasts" aria-live="polite"></div><script src="/assets/control.js" defer></script>
 </body>
 </html>

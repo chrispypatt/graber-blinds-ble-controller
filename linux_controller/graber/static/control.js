@@ -3,7 +3,7 @@
 const $=selector=>document.querySelector(selector);
 const $$=selector=>[...document.querySelectorAll(selector)];
 let state={blinds:{},groups:{},adapters:{},_web:{}};
-let token=sessionStorage.getItem('graberControlToken')||'';
+let authSession={authenticated:false,csrf_token:'',username:''};
 const pending=new Set();
 const activeRequests=new Map();
 const sliderDrafts=new Map();
@@ -20,11 +20,13 @@ function targetPending(targetType,id){return[...pending].some(key=>key.startsWit
 function movementPending(targetType,id){
   return[...pending].some(key=>key.startsWith(`${targetType}:${id}:`)&&!key.endsWith(':stop'));
 }
-async function getState(){const response=await fetch('/api/state');if(!response.ok)throw new Error('Controller unavailable');return response.json()}
+function requireAuth(response){if(response.status===401){window.location.replace('/login');throw new Error('Session expired.')}return response}
+function csrfHeaders(){return{'X-CSRF-Token':authSession.csrf_token}}
+async function loadAuthSession(){const response=requireAuth(await fetch('/api/auth/session'));if(!response.ok)throw new Error('Authentication unavailable');authSession=await response.json();if(authSession.must_change_password)window.location.replace('/login')}
+async function getState(){const response=requireAuth(await fetch('/api/state'));if(!response.ok)throw new Error('Controller unavailable');return response.json()}
 
 async function command(id,action,position=null,targetType='blind'){
   if(!state._web.live_controls){toast('Live controls are disabled.','error');return}
-  if(state._web.token_required&&!token){openAuth();toast('Enter the control token first.','error');return}
   const activeKey=pendingKey(targetType,id,action);
   const targetKey=`${targetType}:${id}`;
   if(action==='stop'){
@@ -36,7 +38,7 @@ async function command(id,action,position=null,targetType='blind'){
   pending.add(activeKey);render();
   let completed=false;
   try{
-    const response=await fetch(`/api/${targetType==='group'?'groups':'blinds'}/${encodeURIComponent(id)}/commands`,{method:'POST',headers:{'Content-Type':'application/json',...(token?{'X-Graber-Control-Token':token}:{})},body:JSON.stringify({action,...(position==null?{}:{position})}),signal:requestController.signal});
+    const response=requireAuth(await fetch(`/api/${targetType==='group'?'groups':'blinds'}/${encodeURIComponent(id)}/commands`,{method:'POST',headers:{'Content-Type':'application/json',...csrfHeaders()},body:JSON.stringify({action,...(position==null?{}:{position})}),signal:requestController.signal}));
     const body=await response.json();
     if(!response.ok)throw new Error(body.error||'Command rejected');
     const outcome=body.result?.outcome||body.result?.successful;
@@ -124,7 +126,6 @@ function render(){
   $('#controllerStatus').className='status-pill online';$('#controllerStatus').innerHTML='<i></i>Online';
   $('#dashboardSummary').textContent=`${blinds.length} shades · ${groups.length} groups`;
   $('#controlNotice').classList.toggle('is-hidden',state._web.live_controls);
-  $('#authButton').textContent=state._web.token_required?(token?'Access ready':'Control access'):'Controls';
   $('#groupSection').classList.toggle('is-hidden',groups.length===0);
   const groupGrid=$('#groupGrid');groupGrid.innerHTML='';groups.forEach(([id,item])=>groupGrid.append(groupCard(id,item)));
   renderBlinds();
@@ -140,14 +141,16 @@ function renderBlinds(){
 }
 
 async function refresh(){if(document.activeElement?.type==='range')return;try{state=await getState();render()}catch(error){$('#controllerStatus').className='status-pill error';$('#controllerStatus').innerHTML='<i></i>Controller unavailable'}}
-function openAuth(){$('#authModal').classList.remove('is-hidden');$('#controlToken').value=token;$('#controlToken').focus()}
-function closeAuth(){$('#authModal').classList.add('is-hidden')}
-async function editSetup(){if(state._web.token_required&&!token){openAuth();toast('Enter the control token first.','error');return}const button=$('#setupButton');button.disabled=true;button.textContent='Opening…';try{const response=await fetch('/api/portal/setup',{method:'POST',headers:{...(token?{'X-Graber-Control-Token':token}:{})}});const text=await response.text();if(!response.ok)throw new Error(text||'Setup is unavailable');sessionStorage.setItem('graberSetupToken',token);window.location.replace('/')}catch(error){toast(error.message,'error',6000);button.disabled=false;button.textContent='Edit setup'}}
+function openAccount(){$('#accountName').textContent=authSession.username;$('#accountError').textContent='';$('#passwordForm').reset();$('#accountModal').classList.remove('is-hidden');$('#currentPassword').focus()}
+function closeAccount(){$('#accountModal').classList.add('is-hidden')}
+async function editSetup(){const button=$('#setupButton');button.disabled=true;button.textContent='Opening…';try{const response=requireAuth(await fetch('/api/portal/setup',{method:'POST',headers:csrfHeaders()}));const text=await response.text();if(!response.ok)throw new Error(text||'Setup is unavailable');window.location.replace('/')}catch(error){toast(error.message,'error',6000);button.disabled=false;button.textContent='Edit setup'}}
+async function changePassword(event){event.preventDefault();const current=$('#currentPassword').value,newPassword=$('#newPassword').value,confirmation=$('#confirmPassword').value,error=$('#accountError');error.textContent='';if(newPassword!==confirmation){error.textContent='Passwords do not match.';return}const button=event.submitter;button.disabled=true;try{const response=requireAuth(await fetch('/api/auth/password',{method:'POST',headers:{'Content-Type':'application/json',...csrfHeaders()},body:JSON.stringify({current_password:current,new_password:newPassword})}));const body=await response.json();if(!response.ok)throw new Error(body.error||'Password change failed.');if(body.csrf_token)authSession=body;closeAccount();toast('Password changed.')}catch(reason){error.textContent=reason.message}finally{button.disabled=false}}
+async function logout(){const button=$('#logoutButton');button.disabled=true;try{await fetch('/api/auth/logout',{method:'POST',headers:csrfHeaders()})}finally{window.location.replace('/login')}}
 
 $('#setupButton').addEventListener('click',editSetup);
-$('#authButton').addEventListener('click',openAuth);
-$('#controlAuthForm').addEventListener('submit',event=>{event.preventDefault();token=$('#controlToken').value.trim();sessionStorage.setItem('graberControlToken',token);closeAuth();render();toast('Control access ready.')});
-$$('[data-close-modal]').forEach(button=>button.addEventListener('click',closeAuth));
+$('#accountButton').addEventListener('click',openAccount);
+$('#passwordForm').addEventListener('submit',changePassword);
+$('#logoutButton').addEventListener('click',logout);
+$$('[data-close-modal]').forEach(button=>button.addEventListener('click',closeAccount));
 $('#blindSearch').addEventListener('input',renderBlinds);
-refresh();
-setInterval(refresh,3000);
+loadAuthSession().then(()=>{refresh();setInterval(refresh,3000)}).catch(()=>{$('#controllerStatus').className='status-pill error';$('#controllerStatus').innerHTML='<i></i>Unavailable'});

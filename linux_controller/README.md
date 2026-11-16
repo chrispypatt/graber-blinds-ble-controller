@@ -20,3 +20,8 @@ pytest linux_controller/tests
 
 The service reads `GRABER_CONFIG` and `GRABER_SECRETS`, defaulting to files in
 `/etc/graber-controller`. The secrets file must have mode `0600`.
+
+The public portal owns browser authentication and proxies to loopback-only setup
+or control children. Password records contain a salted hash only. For HTTPS,
+place a trusted reverse proxy in front of the loopback-bound portal; see
+`../docs/RPI5_SETUP.md`.

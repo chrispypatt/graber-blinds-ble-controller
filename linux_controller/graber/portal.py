@@ -4,22 +4,52 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import ipaddress
 import json
 import os
-import secrets
 import signal
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from aiohttp import ClientSession, ClientTimeout, web
+
+from .auth import (
+    MAXIMUM_PASSWORD_LENGTH,
+    AuthError,
+    AuthManager,
+    PasswordStore,
+    Session,
+)
 
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
+PRIVATE_PROXY_HEADERS = {"cookie", "x-csrf-token", "x-graber-control-token"}
+PRIVATE_RESPONSE_HEADERS = {"set-cookie"}
+
+
+def _request_client(request: web.Request, trusted_proxies: tuple[Any, ...]) -> str:
+    """Resolve a client address without trusting forwarded headers from LAN peers."""
+    try:
+        peer = ipaddress.ip_address((request.remote or "").split("%", 1)[0])
+    except ValueError:
+        return ""
+    if not any(peer in network for network in trusted_proxies):
+        return str(peer)
+    forwarded: list[Any] = []
+    for value in request.headers.get("X-Forwarded-For", "").split(","):
+        try:
+            forwarded.append(ipaddress.ip_address(value.strip().split("%", 1)[0]))
+        except ValueError:
+            continue
+    for candidate in reversed(forwarded):
+        if not any(candidate in network for network in trusted_proxies):
+            return str(candidate)
+    return str(forwarded[0] if forwarded else peer)
 
 
 def is_command_request(method: str, path: str) -> bool:
@@ -151,25 +181,92 @@ class ModeSupervisor:
                 await process.wait()
 
 
-def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...]) -> web.Application:
+def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
+               auth_manager: AuthManager,
+               trusted_proxies: tuple[str, ...] = ()) -> web.Application:
     networks = tuple(ipaddress.ip_network(value) for value in allowed_networks)
+    proxy_networks = tuple(ipaddress.ip_network(value) for value in trusted_proxies)
+    public = {
+        ("GET", "/login"),
+        ("GET", "/assets/auth.js"),
+        ("GET", "/assets/app.css"),
+        ("POST", "/api/auth/login"),
+    }
+    password_routes = {
+        ("GET", "/api/auth/session"),
+        ("POST", "/api/auth/password"),
+        ("POST", "/api/auth/logout"),
+    }
+
+    def security_headers(response: web.StreamResponse) -> None:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; base-uri 'none'; "
+            "frame-ancestors 'none'; form-action 'self'"
+        )
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        if auth_manager.secure_cookie:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+
+    @web.middleware
+    async def hardened(request: web.Request, handler: Any) -> web.StreamResponse:
+        try:
+            response = await handler(request)
+        except web.HTTPException as exc:
+            security_headers(exc)
+            raise
+        security_headers(response)
+        return response
 
     @web.middleware
     async def lan_only(request: web.Request, handler: Any) -> web.StreamResponse:
+        client = _request_client(request, proxy_networks)
+        request["graber_client"] = client
         try:
-            address = ipaddress.ip_address((request.remote or "").split("%", 1)[0])
+            address = ipaddress.ip_address(client)
         except ValueError:
-            raise web.HTTPForbidden(text="client is outside allowed networks")
+            return web.json_response({"error": "client is outside allowed networks"}, status=403)
         if not any(address in network for network in networks):
-            raise web.HTTPForbidden(text="client is outside allowed networks")
-        response = await handler(request)
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Pragma"] = "no-cache"
-        return response
+            return web.json_response({"error": "client is outside allowed networks"}, status=403)
+        return await handler(request)
 
-    app = web.Application(middlewares=[lan_only])
+    def unauthorized(request: web.Request, *, password_change: bool = False) -> web.StreamResponse:
+        if request.path.startswith("/api/"):
+            payload = {"error": "authentication required"}
+            if password_change:
+                payload = {"error": "password change required", "must_change_password": True}
+            return web.json_response(payload, status=403 if password_change else 401)
+        raise web.HTTPSeeOther("/login")
+
+    @web.middleware
+    async def authenticated(request: web.Request, handler: Any) -> web.StreamResponse:
+        route = (request.method, request.path)
+        if route in public:
+            return await handler(request)
+        token = request.cookies.get(auth_manager.cookie_name)
+        session = auth_manager.sessions.get(token)
+        if session is None:
+            return unauthorized(request)
+        request["graber_session"] = session
+        request["graber_session_token"] = token
+        if session.must_change_password and route not in password_routes:
+            return unauthorized(request, password_change=True)
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            supplied = request.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(supplied, session.csrf_token):
+                return web.json_response({"error": "invalid CSRF token"}, status=403)
+        return await handler(request)
+
+    app = web.Application(
+        middlewares=[hardened, lan_only, authenticated], client_max_size=16 * 1024
+    )
     app[web.AppKey("supervisor", ModeSupervisor)] = supervisor
     client_key = web.AppKey("proxy_client", ClientSession)
+    password_checks = asyncio.Semaphore(2)
 
     async def lifecycle(application: web.Application):
         application[client_key] = ClientSession(
@@ -184,16 +281,117 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...])
 
     app.cleanup_ctx.append(lifecycle)
 
-    def authorize(request: web.Request) -> None:
-        supplied = request.headers.get("X-Graber-Control-Token", "")
-        if not secrets.compare_digest(supplied, supervisor.control_token()):
-            raise web.HTTPForbidden(text="invalid control token")
+    def session_payload(session: Session) -> dict[str, object]:
+        return {
+            "authenticated": True,
+            "username": session.username,
+            "csrf_token": session.csrf_token,
+            "must_change_password": session.must_change_password,
+        }
+
+    def set_session_cookie(response: web.StreamResponse, token: str) -> None:
+        response.set_cookie(
+            auth_manager.cookie_name, token,
+            max_age=int(auth_manager.session_ttl_s), path="/",
+            secure=auth_manager.secure_cookie, httponly=True, samesite="Strict",
+        )
+
+    def clear_session_cookie(response: web.StreamResponse) -> None:
+        response.set_cookie(
+            auth_manager.cookie_name, "", max_age=0, expires="Thu, 01 Jan 1970 00:00:00 GMT", path="/",
+            secure=auth_manager.secure_cookie, httponly=True, samesite="Strict",
+        )
+
+    async def login_page(_request: web.Request) -> web.Response:
+        template = (Path(__file__).parent / "templates" / "auth.html").read_text(encoding="utf-8")
+        return web.Response(text=template, content_type="text/html")
+
+    async def auth_javascript(_request: web.Request) -> web.Response:
+        value = (Path(__file__).parent / "static" / "auth.js").read_text(encoding="utf-8")
+        return web.Response(text=value, content_type="application/javascript")
+
+    async def stylesheet(_request: web.Request) -> web.Response:
+        value = (Path(__file__).parent / "static" / "app.css").read_text(encoding="utf-8")
+        return web.Response(text=value, content_type="text/css")
+
+    async def login(request: web.Request) -> web.Response:
+        retry_after = auth_manager.limiter.retry_after(request["graber_client"])
+        if retry_after:
+            return web.json_response(
+                {"error": "too many login attempts"}, status=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, TypeError):
+            return web.json_response({"error": "invalid request"}, status=400)
+        if not isinstance(body, Mapping):
+            return web.json_response({"error": "invalid request"}, status=400)
+        username, password = str(body.get("username", "")), str(body.get("password", ""))
+        if not 1 <= len(username) <= 64 or not 1 <= len(password) <= MAXIMUM_PASSWORD_LENGTH:
+            return web.json_response({"error": "invalid username or password"}, status=401)
+        try:
+            await asyncio.wait_for(password_checks.acquire(), timeout=2)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "authentication is busy"}, status=503)
+        try:
+            result = await asyncio.to_thread(
+                auth_manager.login, request["graber_client"], username, password
+            )
+        finally:
+            password_checks.release()
+        if result is None:
+            return web.json_response({"error": "invalid username or password"}, status=401)
+        token, session = result
+        response = web.json_response(session_payload(session))
+        set_session_cookie(response, token)
+        return response
+
+    async def auth_session(request: web.Request) -> web.Response:
+        return web.json_response(session_payload(request["graber_session"]))
+
+    async def logout(request: web.Request) -> web.Response:
+        auth_manager.sessions.remove(request["graber_session_token"])
+        response = web.json_response({"authenticated": False})
+        clear_session_cookie(response)
+        return response
+
+    async def change_password(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            if not isinstance(body, Mapping):
+                raise TypeError
+        except (json.JSONDecodeError, TypeError):
+            return web.json_response({"error": "invalid request"}, status=400)
+        current_password = body.get("current_password")
+        new_password = str(body.get("new_password", ""))
+        if current_password is not None:
+            current_password = str(current_password)
+        if len(new_password) > MAXIMUM_PASSWORD_LENGTH or (
+            current_password is not None and len(current_password) > MAXIMUM_PASSWORD_LENGTH
+        ):
+            return web.json_response({"error": "invalid password"}, status=400)
+        try:
+            await asyncio.wait_for(password_checks.acquire(), timeout=2)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "authentication is busy"}, status=503)
+        try:
+            token, session = await asyncio.to_thread(
+                auth_manager.change_password, request["graber_session"],
+                current_password, new_password,
+            )
+        except AuthError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        finally:
+            password_checks.release()
+        response = web.json_response(session_payload(session))
+        set_session_cookie(response, token)
+        return response
 
     async def portal_status(_request: web.Request) -> web.Response:
         return web.json_response({"mode": supervisor.mode})
 
     async def enter_setup(request: web.Request) -> web.Response:
-        authorize(request)
         if supervisor.active_commands:
             raise web.HTTPConflict(text="wait for the active shade command to finish")
         await supervisor.switch("setup")
@@ -207,7 +405,8 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...])
         try:
             body = await request.read()
             headers = {key: value for key, value in request.headers.items()
-                       if key.lower() not in HOP_BY_HOP}
+                       if key.lower() not in HOP_BY_HOP | PRIVATE_PROXY_HEADERS}
+            headers["X-Graber-Control-Token"] = supervisor.control_token()
             target = f"http://{supervisor.internal_host}:{supervisor.internal_port}{request.rel_url}"
             async with app[client_key].request(
                 request.method, target, data=body, headers=headers, allow_redirects=False
@@ -215,7 +414,7 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...])
                 response_body = await upstream.read()
                 status = upstream.status
                 response_headers = {key: value for key, value in upstream.headers.items()
-                                    if key.lower() not in HOP_BY_HOP}
+                                    if key.lower() not in HOP_BY_HOP | PRIVATE_RESPONSE_HEADERS}
             if (supervisor.mode == "setup" and request.method == "POST" and
                     request.path == "/api/export" and 200 <= status < 300):
                 await supervisor.switch("control")
@@ -233,6 +432,13 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...])
             if command_request:
                 supervisor.active_commands -= 1
 
+    app.router.add_get("/login", login_page)
+    app.router.add_get("/assets/auth.js", auth_javascript)
+    app.router.add_get("/assets/app.css", stylesheet)
+    app.router.add_post("/api/auth/login", login)
+    app.router.add_get("/api/auth/session", auth_session)
+    app.router.add_post("/api/auth/logout", logout)
+    app.router.add_post("/api/auth/password", change_password)
     app.router.add_get("/api/portal/status", portal_status)
     app.router.add_post("/api/portal/setup", enter_setup)
     app.router.add_route("*", "/{path:.*}", proxy)
@@ -251,6 +457,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--secrets", required=True, type=Path)
     parser.add_argument("--token-file", required=True, type=Path)
+    parser.add_argument("--auth-file", required=True, type=Path)
+    parser.add_argument("--session-ttl-s", type=float, default=12 * 60 * 60)
+    parser.add_argument("--secure-cookie", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--trusted-proxy", action="append", default=[])
     parser.add_argument("--mode-file", required=True, type=Path)
     args = parser.parse_args(argv)
     supervisor = ModeSupervisor(
@@ -258,7 +468,14 @@ def main(argv: list[str] | None = None) -> None:
         config_path=args.config, secrets_path=args.secrets, token_file=args.token_file,
         mode_file=args.mode_file, internal_host=args.internal_host, internal_port=args.internal_port,
     )
-    web.run_app(create_app(supervisor, allowed_networks=tuple(args.allowed_network)),
+    auth_manager = AuthManager(
+        PasswordStore(args.auth_file), secure_cookie=args.secure_cookie,
+        session_ttl_s=args.session_ttl_s,
+    )
+    web.run_app(create_app(
+                    supervisor, allowed_networks=tuple(args.allowed_network),
+                    trusted_proxies=tuple(args.trusted_proxy), auth_manager=auth_manager,
+                ),
                 host=args.host, port=args.port)
 
 

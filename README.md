@@ -15,12 +15,12 @@ retained in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 Features include single-rail and TDBU control, independent per-blind queues,
 bounded retries, acknowledged-write no-replay safety, configurable warm links,
 stable external-adapter identity/failover, group control, MQTT Discovery entities,
-a token-gated LAN UI, and read-only identification/reliability tooling.
+a password-protected LAN UI, and read-only identification/reliability tooling.
 
-No real motor address, access code, or Home Assistant identity belongs in this
-repository. Live web control is rejected until a private token and explicit
-live-control setting are provided. Automated tests never require Bluetooth
-hardware or move a shade.
+No real motor address, access code, password, or Home Assistant identity belongs
+in this repository. The installer stores only a salted password hash for portal
+login; the internal controller token is never sent to the browser. Automated
+tests never require Bluetooth hardware or move a shade.
 
 ## Start here
 
@@ -37,8 +37,8 @@ Then read the [architecture audit](docs/ARCHITECTURE_AUDIT.md),
 
 ## Identification and setup
 
-Install the service, retrieve its setup key, and open the web wizard. The
-wizard scans, identifies, names, groups, and saves shades, then switches the
+Install the service, retrieve the one-time initial password, and open the web
+wizard. It scans, identifies, names, groups, and saves shades, then switches the
 same address to the control page. See the [Pi setup guide](docs/RPI5_SETUP.md).
 
 Command-line adapter, inventory, and performance tools remain available for

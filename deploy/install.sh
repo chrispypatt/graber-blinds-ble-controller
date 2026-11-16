@@ -9,7 +9,8 @@ usage() {
   echo "  install targets may be overridden with GRABER_INSTALL_DIR," >&2
   echo "  GRABER_CONFIG_DIR, GRABER_STATE_DIR, and GRABER_SERVICE_NAME" >&2
   echo "  web bind may be overridden with GRABER_PORTAL_HOST," >&2
-  echo "  GRABER_PORTAL_PORT, and GRABER_ALLOWED_NETWORKS" >&2
+  echo "  GRABER_PORTAL_PORT, GRABER_PORTAL_SECURE_COOKIE," >&2
+  echo "  GRABER_PORTAL_TRUSTED_PROXIES, and GRABER_ALLOWED_NETWORKS" >&2
 }
 
 apply=false
@@ -37,6 +38,8 @@ service_name=${GRABER_SERVICE_NAME:-graber-controller}
 service_file=/etc/systemd/system/$service_name.service
 portal_host=${GRABER_PORTAL_HOST:-0.0.0.0}
 portal_port=${GRABER_PORTAL_PORT:-8080}
+portal_secure_cookie=${GRABER_PORTAL_SECURE_COOKIE:-false}
+portal_trusted_proxies=${GRABER_PORTAL_TRUSTED_PROXIES:-}
 portal_allowed_networks=${GRABER_ALLOWED_NETWORKS:-127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}
 
 for target in "$install_dir" "$config_dir" "$state_dir"; do
@@ -64,15 +67,22 @@ if [ "$portal_port" -lt 1 ] || [ "$portal_port" -gt 65535 ]; then
   echo "GRABER_PORTAL_PORT must be from 1 through 65535" >&2
   exit 2
 fi
+case "$portal_secure_cookie" in
+  true|false) ;;
+  *) echo "GRABER_PORTAL_SECURE_COOKIE must be true or false" >&2; exit 2 ;;
+esac
 case "$portal_allowed_networks" in
   *[!A-Fa-f0-9:.,/-]*|'') echo "invalid GRABER_ALLOWED_NETWORKS" >&2; exit 2 ;;
+esac
+case "$portal_trusted_proxies" in
+  *[!A-Fa-f0-9:.,/-]*) echo "invalid GRABER_PORTAL_TRUSTED_PROXIES" >&2; exit 2 ;;
 esac
 
 echo "Plan:"
 echo "  install BlueZ, Python venv support, and Bluetooth inspection utilities"
 echo "  install controller source at $install_dir"
 echo "  preserve any existing $config_dir/config.toml and secrets.toml"
-echo "  create or preserve private setup settings and key"
+echo "  create or preserve private portal authentication and internal key"
 echo "  install $service_file"
 if [ "$enable" = true ]; then
   echo "  enable/start $service_name in setup or control mode"
@@ -136,6 +146,7 @@ install -o root -g graber -m 0640 "$script_dir/setup-wizard.example.env" \
   "$config_dir/setup-wizard.example.env"
 
 token_file=$state_dir/setup-token
+auth_file=$state_dir/portal/auth.json
 setup_settings=$config_dir/setup.env
 controller_environment=$config_dir/controller.env
 if [ ! -f "$token_file" ]; then
@@ -147,6 +158,14 @@ if [ ! -f "$token_file" ]; then
 fi
 chown graber:graber "$token_file"
 chmod 0600 "$token_file"
+
+if [ ! -f "$auth_file" ]; then
+  sudo -u graber env PYTHONPATH="$install_dir" "$install_dir/.venv/bin/python" \
+    -m graber.auth init --file "$auth_file" \
+    --initial-password-file "$token_file" --username admin
+fi
+chown graber:graber "$auth_file"
+chmod 0600 "$auth_file"
 
 if [ ! -f "$setup_settings" ]; then
   settings_tmp=$(mktemp)
@@ -178,13 +197,28 @@ if [ ! -f "$controller_environment" ]; then
     echo "GRABER_SETUP_RUNNER=$install_dir/bin/run-setup-wizard"
     echo "GRABER_SETUP_SETTINGS=$setup_settings"
     echo "GRABER_CONTROL_TOKEN_FILE=$token_file"
+    echo "GRABER_PORTAL_AUTH_FILE=$auth_file"
     echo "GRABER_PORTAL_STATE_DIR=$state_dir/portal"
     echo "GRABER_PORTAL_ALLOWED_NETWORKS=$portal_allowed_networks"
     echo "GRABER_PORTAL_HOST=$portal_host"
     echo "GRABER_PORTAL_PORT=$portal_port"
+    echo "GRABER_PORTAL_SECURE_COOKIE=$portal_secure_cookie"
+    echo "GRABER_PORTAL_TRUSTED_PROXIES=$portal_trusted_proxies"
   } >"$environment_tmp"
   install -o root -g graber -m 0640 "$environment_tmp" "$controller_environment"
   rm -f "$environment_tmp"
+fi
+
+# Add newly introduced settings to existing installs without replacing local
+# overrides or private configuration.
+if ! grep -q '^GRABER_PORTAL_AUTH_FILE=' "$controller_environment"; then
+  echo "GRABER_PORTAL_AUTH_FILE=$auth_file" >>"$controller_environment"
+fi
+if ! grep -q '^GRABER_PORTAL_SECURE_COOKIE=' "$controller_environment"; then
+  echo "GRABER_PORTAL_SECURE_COOKIE=$portal_secure_cookie" >>"$controller_environment"
+fi
+if ! grep -q '^GRABER_PORTAL_TRUSTED_PROXIES=' "$controller_environment"; then
+  echo "GRABER_PORTAL_TRUSTED_PROXIES=$portal_trusted_proxies" >>"$controller_environment"
 fi
 chown root:graber "$controller_environment"
 chmod 0640 "$controller_environment"
