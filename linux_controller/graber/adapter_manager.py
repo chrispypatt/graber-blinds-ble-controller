@@ -31,6 +31,12 @@ class AdapterStats:
     failures: int = 0
     last_error: str | None = None
     last_seen: float | None = None
+    disconnects: int = 0
+    recoveries: int = 0
+    last_unavailable: float | None = None
+    last_recovered: float | None = None
+    resolution_failures: int = 0
+    last_resolution_error: str | None = None
 
 
 @dataclass
@@ -63,23 +69,60 @@ class AdapterManager:
     def health(self) -> dict[str, dict[str, object]]:
         return {
             adapter_id: {
-                "status": "online" if runtime.resolved is not None else "unavailable",
+                "status": (
+                    "unknown" if runtime.stats.last_resolution_error is not None
+                    else "online" if runtime.resolved is not None
+                    else "unavailable"
+                ),
                 "connection_attempts": runtime.stats.connection_attempts,
                 "connection_successes": runtime.stats.connection_successes,
                 "failures": runtime.stats.failures,
                 "last_error": runtime.stats.last_error,
                 "last_seen": runtime.stats.last_seen,
+                "disconnects": runtime.stats.disconnects,
+                "recoveries": runtime.stats.recoveries,
+                "last_unavailable": runtime.stats.last_unavailable,
+                "last_recovered": runtime.stats.last_recovered,
+                "resolution_failures": runtime.stats.resolution_failures,
+                "last_resolution_error": runtime.stats.last_resolution_error,
             }
             for adapter_id, runtime in self._runtime.items()
         }
 
     async def refresh(self) -> None:
         async with self._refresh_lock:
-            resolved = {item.id: item for item in await self._resolver(self._configs)}
+            try:
+                resolved = {item.id: item for item in await self._resolver(self._configs)}
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                # Resolution failure means controller state is unknown, not
+                # necessarily offline. Preserve active handles and retry on the
+                # next bounded refresh instead of killing the health task.
+                for runtime in self._runtime.values():
+                    runtime.stats.resolution_failures += 1
+                    runtime.stats.last_resolution_error = error
+                return
             now = time.time()
             for adapter_id, runtime in self._runtime.items():
-                runtime.resolved = resolved.get(adapter_id)
-                if runtime.resolved:
+                runtime.stats.last_resolution_error = None
+                previous = runtime.resolved
+                current = resolved.get(adapter_id)
+                if previous is not None and current is None:
+                    self._mark_unavailable(runtime, "adapter not found during refresh", now=now)
+                    continue
+                if current is not None:
+                    # A controller can return with a different transient hci name.
+                    # Its configured address/USB path remains the identity.
+                    rebound = previous is not None and previous.device != current.device
+                    recovered = previous is None and runtime.stats.last_unavailable is not None
+                    if rebound or recovered:
+                        if rebound:
+                            runtime.stats.disconnects += 1
+                            runtime.stats.last_unavailable = now
+                        runtime.stats.recoveries += 1
+                        runtime.stats.last_recovered = now
+                        runtime.stats.last_error = None
+                    runtime.resolved = current
                     runtime.stats.last_seen = now
 
     async def candidates(self, blind: BlindConfig) -> list[AdapterRuntime]:
@@ -101,15 +144,23 @@ class AdapterManager:
 
     @asynccontextmanager
     async def connection(self, runtime: AdapterRuntime) -> AsyncIterator[ResolvedAdapter]:
-        if runtime.resolved is None:
-            raise AdapterUnavailable(f"adapter {runtime.config.id} disappeared")
         async with runtime.connection_slots:
+            if runtime.resolved is None:
+                await self.refresh()
+            if runtime.resolved is None:
+                raise AdapterUnavailable(f"adapter {runtime.config.id} disappeared")
             runtime.stats.assignments += 1
             yield runtime.resolved
 
     @asynccontextmanager
     async def cold_connection(self, runtime: AdapterRuntime) -> AsyncIterator[None]:
         async with runtime.cold_slots:
+            # Re-check after waiting in the per-adapter queue. A health refresh
+            # may have observed a USB disconnect while this work was queued.
+            if runtime.resolved is None:
+                await self.refresh()
+            if runtime.resolved is None:
+                raise AdapterUnavailable(f"adapter {runtime.config.id} disappeared")
             runtime.stats.connection_attempts += 1
             yield
 
@@ -120,7 +171,33 @@ class AdapterManager:
     def record_failure(self, runtime: AdapterRuntime, error: BaseException) -> None:
         runtime.stats.failures += 1
         runtime.stats.last_error = f"{type(error).__name__}: {error}"
-        # Missing-device/BlueZ errors are re-resolved before the next command.
-        text = str(error).lower()
-        if any(word in text for word in ("not available", "no such", "org.bluez", "adapter")):
-            runtime.resolved = None
+        if self._adapter_disappeared(error):
+            self._mark_unavailable(runtime, runtime.stats.last_error)
+
+    @staticmethod
+    def _adapter_disappeared(error: BaseException) -> bool:
+        """Recognize controller-loss errors without blaming normal GATT failures."""
+        text = f"{type(error).__name__}: {error}".casefold()
+        markers = (
+            "adapter is not available",
+            "adapter not available",
+            "adapter not found",
+            "no such adapter",
+            "no default controller available",
+            "org.bluez.error.notready",
+            "org.freedesktop.dbus.error.unknownobject",
+            "controller is not available",
+            "controller unavailable",
+            "controller powered off",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _mark_unavailable(
+        runtime: AdapterRuntime, error: str, *, now: float | None = None,
+    ) -> None:
+        if runtime.resolved is not None:
+            runtime.stats.disconnects += 1
+            runtime.stats.last_unavailable = time.time() if now is None else now
+        runtime.resolved = None
+        runtime.stats.last_error = error

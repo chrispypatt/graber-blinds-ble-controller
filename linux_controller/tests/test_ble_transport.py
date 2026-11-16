@@ -1,6 +1,7 @@
 import asyncio
 
-from graber.ble_transport import BleakTransport
+import graber.ble_transport as ble_transport
+from graber.ble_transport import BleakConnection, BleakTransport
 
 
 class FakeDevice:
@@ -98,5 +99,87 @@ def test_discover_waits_for_active_monitor_instead_of_starting_another_scan():
             await monitor
         except asyncio.CancelledError:
             pass
+
+    asyncio.run(scenario())
+
+
+def test_connect_failure_discards_stale_device_for_reconnect_scan():
+    class FailingClient:
+        def __init__(self, _device, **_kwargs):
+            pass
+
+        async def connect(self):
+            raise RuntimeError("org.freedesktop.DBus.Error.UnknownObject")
+
+    async def scenario():
+        transport = make_transport()
+        transport._client_type = FailingClient
+        discovered = transport._discovered(FakeDevice(), FakeAdvertisement())
+        transport._remember("hci9", discovered)
+        assert transport._advertisements
+        try:
+            await transport.connect(discovered, "hci9", 0.1)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("connect should fail")
+        assert transport._advertisements == {}
+
+    asyncio.run(scenario())
+
+
+def test_monitor_failure_discards_cached_devices():
+    class FailingScanner(FakeScanner):
+        async def start(self):
+            raise RuntimeError("adapter is not available")
+
+    async def scenario():
+        transport = make_transport()
+        transport._scanner_type = FailingScanner
+        discovered = transport._discovered(FakeDevice(), FakeAdvertisement())
+        transport._remember("hci9", discovered)
+        try:
+            await transport.monitor_advertisements("hci9", lambda _device: None, 30)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("monitor should fail")
+        assert transport._advertisements == {}
+        assert "hci9" not in transport._monitored_adapters
+
+    asyncio.run(scenario())
+
+
+def test_bluez_cleanup_operations_are_bounded(monkeypatch):
+    monkeypatch.setattr(ble_transport, "BLUEZ_CLEANUP_TIMEOUT_S", 0.01)
+
+    class HangingClient:
+        is_connected = True
+
+        async def disconnect(self):
+            await asyncio.Event().wait()
+
+    class HangingScanner(FakeScanner):
+        async def start(self):
+            await asyncio.Event().wait()
+
+    async def scenario():
+        connection = BleakConnection(HangingClient())
+        try:
+            await connection.disconnect()
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("disconnect cleanup should time out")
+
+        transport = make_transport()
+        transport._scanner_type = HangingScanner
+        try:
+            await transport.monitor_advertisements("hci9", lambda _device: None, 30)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("scanner startup should time out")
+        assert "hci9" not in transport._monitored_adapters
 
     asyncio.run(scenario())

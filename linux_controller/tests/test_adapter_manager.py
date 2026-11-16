@@ -58,3 +58,127 @@ def test_cold_connection_limit_is_independent_per_adapter():
         await asyncio.gather(first, second)
         assert entered == [1, 2]
     run(scenario())
+
+
+def test_loss_and_recovery_rebinds_transient_hci_name_and_updates_health():
+    config = AdapterConfig("a", "AA:00:00:00:00:01")
+    snapshots = [
+        [ResolvedAdapter("a", config.controller_address, "hci1", "1-2.3")],
+        [],
+        [ResolvedAdapter("a", config.controller_address, "hci7", "1-2.3")],
+    ]
+
+    async def resolver(_configs):
+        return snapshots.pop(0)
+
+    manager = AdapterManager((config,), resolver)
+
+    async def scenario():
+        await manager.refresh()
+        assert manager.health()["a"]["status"] == "online"
+        await manager.refresh()
+        lost = manager.health()["a"]
+        assert lost["status"] == "unavailable"
+        assert lost["disconnects"] == 1
+        assert lost["last_unavailable"] is not None
+        await manager.refresh()
+        recovered = manager.health()["a"]
+        assert recovered["status"] == "online"
+        assert recovered["recoveries"] == 1
+        assert recovered["disconnects"] == 1
+        assert recovered["last_recovered"] is not None
+        blind = BlindConfig("x", "X", "11", False, "1234567", "a")
+        assert (await manager.candidates(blind))[0].resolved.device == "hci7"
+
+    run(scenario())
+
+
+def test_queued_cold_work_rechecks_adapter_and_fails_boundedly():
+    config = AdapterConfig("a", "AA:00:00:00:00:01", max_cold_connections=1)
+    online = True
+
+    async def resolver(_configs):
+        if online:
+            return [ResolvedAdapter("a", config.controller_address, "hci1")]
+        return []
+
+    manager = AdapterManager((config,), resolver)
+
+    async def scenario():
+        nonlocal online
+        await manager.refresh()
+        runtime = manager._runtime["a"]
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def first():
+            async with manager.cold_connection(runtime):
+                entered.set()
+                await release.wait()
+
+        holder = asyncio.create_task(first())
+        await entered.wait()
+        waiting = asyncio.create_task(manager.cold_connection(runtime).__aenter__())
+        await asyncio.sleep(0)
+        online = False
+        await manager.refresh()
+        release.set()
+        await holder
+        with pytest.raises(AdapterUnavailable):
+            await asyncio.wait_for(waiting, 0.2)
+
+    run(scenario())
+
+
+def test_normal_gatt_failure_does_not_offline_adapter():
+    config = AdapterConfig("a", "AA:00:00:00:00:01")
+
+    async def resolver(_configs):
+        return [ResolvedAdapter("a", config.controller_address, "hci1")]
+
+    manager = AdapterManager((config,), resolver)
+
+    async def scenario():
+        await manager.refresh()
+        runtime = manager._runtime["a"]
+        manager.record_failure(runtime, RuntimeError("GATT operation timed out"))
+        assert runtime.resolved is not None
+        manager.record_failure(
+            runtime,
+            RuntimeError("org.freedesktop.DBus.Error.UnknownObject: adapter vanished"),
+        )
+        assert runtime.resolved is None
+        assert manager.health()["a"]["disconnects"] == 1
+
+    run(scenario())
+
+
+def test_resolver_failure_is_contained_and_health_recovers():
+    config = AdapterConfig("a", "AA:00:00:00:00:01")
+    calls = 0
+
+    async def resolver(_configs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("bluetoothctl temporarily failed")
+        return [ResolvedAdapter("a", config.controller_address, "hci1")]
+
+    manager = AdapterManager((config,), resolver)
+
+    async def scenario():
+        await manager.refresh()
+        runtime = manager._runtime["a"]
+        original = runtime.resolved
+        await manager.refresh()
+        unknown = manager.health()["a"]
+        assert unknown["status"] == "unknown"
+        assert unknown["resolution_failures"] == 1
+        assert "temporarily failed" in unknown["last_resolution_error"]
+        assert runtime.resolved is original
+        await manager.refresh()
+        healthy = manager.health()["a"]
+        assert healthy["status"] == "online"
+        assert healthy["last_resolution_error"] is None
+
+    run(scenario())

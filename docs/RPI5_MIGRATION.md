@@ -37,6 +37,13 @@ Follow `RPI5_SETUP.md`. Validate adapters individually, together, after reboot,
 and after a temporary USB disconnect. Resolve them from controller address plus
 USB identity/path every time; `hciN` is only the current runtime handle.
 
+During a supervised disconnect check, leave the controller running but pause
+movement automations and issue no shade command. The missing adapter should
+become unavailable, queued work should fail within configured bounds, and the
+other adapter should remain usable. Reconnect the adapter to the same physical
+path and confirm its health returns online without restarting the controller or
+the Pi. Health records disconnect/recovery counts and their latest timestamps.
+
 Perform adapter-specific scans that do not connect or write and collect
 advertisement latency and RSSI for every motor selected for the pilot. Do not
 read access codes during routine diagnostics, log them, or publish raw inventory
@@ -121,13 +128,16 @@ Full TDBU open therefore reports bottom 100/top 0, and full close reports
 bottom 0/top 0. The two cover entities describe rail locations; they do not
 promise that two arbitrary absolute targets persist together.
 
-Discovery includes single-rail covers, separate TDBU rail covers, diagnostics,
-and command-only group covers. Groups with one member remain internal command
-targets and do not create redundant Home Assistant entities. Multi-member
-groups receive a cover for Open, Close, and Stop plus a Favorite action. Stack
-Up/Down actions are discovered only for groups whose known members are all
-TDBU. Group covers do not publish an invented aggregate position. Blind and
-group command topics remain distinct even when their IDs match.
+Discovery classifies cover entities as shades. It includes single-rail covers,
+separate TDBU rail covers, a full-shade cover for each TDBU shade, diagnostics,
+and command-only group covers. The TDBU full-shade cover exposes only verified
+full Open, full Close, and Stop; it does not claim arbitrary combined rail
+positioning. Groups with one member remain internal command targets and do not
+create redundant group entities. Multi-member groups receive a cover for Open,
+Close, and Stop plus a Favorite action. Stack Up/Down actions are discovered
+only for groups whose known members are all TDBU. Group covers do not publish an
+invented aggregate position. Blind and group command topics remain distinct
+even when their IDs match.
 
 Diagnostics report `queued`, `running`, `write_acknowledged`, and
 `awaiting_feedback` while an operation is active. Terminal results distinguish
@@ -148,10 +158,15 @@ When pilot acceptance is complete:
 5. Preserve old entities disabled/available for rollback until the observation
    period passes. Do not delete them during the pilot.
 
-After cutover, expose native cover entities to voice assistants for Open,
-Close, Stop, and position control where supported. Keep scripts only for
-Favorite or protocol-specific TDBU actions. Treat broker TLS/web authentication
-hardening as a separate prerequisite before expanding remote or voice access.
+After cutover, use Home Assistant Cloud's Alexa exposure settings to expose the
+native shade/group covers needed for Open, Close, Stop, and supported position
+control. Explicitly hide legacy controller entities and Alexa-only movement
+scripts, then run Alexa discovery. Keep at most a narrowly named Favorite script
+where that non-cover action is wanted. For TDBU shades, expose the full-shade
+cover for whole-shade Open/Close/Stop and expose rail covers only when their
+names make rail-specific voice control unambiguous. Treat broker TLS/web
+authentication hardening as a separate prerequisite before expanding remote or
+voice access.
 
 ## Rollback
 
@@ -167,7 +182,9 @@ known-good Git revision, run `sudo ./deploy/install.sh --apply`, validate the
 unchanged private config, and restart. The installer does not overwrite
 `/etc/graber-controller/config.toml` or `secrets.toml`.
 
-If an external adapter is unhealthy, stop the service before unplugging it. Do
-not silently fall back to onboard Bluetooth or reboot the Pi as routine
-recovery. Preserve the metrics/journal excerpt needed to diagnose the failure,
-redacting private inventory before sharing.
+An external adapter that disappears is re-resolved from stable identity when it
+returns; stale BlueZ device objects are not reused. Do not silently fall back to
+onboard Bluetooth or reboot the Pi as routine recovery. If automatic recovery
+does not complete, stop the service before physical troubleshooting and preserve
+the metrics/journal excerpt needed to diagnose the failure, redacting private
+inventory before sharing.

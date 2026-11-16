@@ -9,6 +9,7 @@ from typing import Awaitable, Callable, Protocol
 
 
 Notification = Callable[[bytes], None]
+BLUEZ_CLEANUP_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,9 @@ class BleakConnection:
 
     async def disconnect(self) -> None:
         if self.connected:
-            await self._client.disconnect()  # type: ignore[attr-defined]
+            await asyncio.wait_for(
+                self._client.disconnect(), BLUEZ_CLEANUP_TIMEOUT_S  # type: ignore[attr-defined]
+            )
 
     def has_characteristic(self, characteristic: str) -> bool:
         services = getattr(self._client, "services", None)
@@ -94,6 +97,12 @@ class BleakTransport:
         if event is not None:
             event.set()
 
+    def invalidate_adapter(self, adapter: str) -> None:
+        """Drop BLEDevice objects tied to a vanished BlueZ controller."""
+        stale = [key for key in self._advertisements if key[0] == adapter]
+        for key in stale:
+            self._advertisements.pop(key, None)
+
     async def monitor_advertisements(
         self, adapter: str, callback: Callable[[DiscoveredDevice], None], duration_s: float = 30.0,
         addresses: set[str] | None = None,
@@ -116,12 +125,15 @@ class BleakTransport:
         scanner = self._scanner_type(detection_callback=detected, adapter=adapter)
         self._monitored_adapters.add(adapter)
         try:
-            await scanner.start()
+            await asyncio.wait_for(scanner.start(), BLUEZ_CLEANUP_TIMEOUT_S)
             await asyncio.sleep(duration_s)
+        except Exception:
+            self.invalidate_adapter(adapter)
+            raise
         finally:
             self._monitored_adapters.discard(adapter)
             try:
-                await scanner.stop()
+                await asyncio.wait_for(scanner.stop(), BLUEZ_CLEANUP_TIMEOUT_S)
             except Exception:
                 pass
 
@@ -158,6 +170,12 @@ class BleakTransport:
 
     async def connect(self, device: DiscoveredDevice, adapter: str, timeout_s: float) -> BleConnection:
         # Passing the scanned BLEDevice avoids Bleak's implicit discovery path.
-        client = self._client_type(device.device, adapter=adapter, timeout=timeout_s)
-        await asyncio.wait_for(client.connect(), timeout_s)
+        try:
+            client = self._client_type(device.device, adapter=adapter, timeout=timeout_s)
+            await asyncio.wait_for(client.connect(), timeout_s)
+        except Exception:
+            # A BLEDevice contains a BlueZ object path scoped to the adapter.
+            # It must be rediscovered after USB/BlueZ tears that object down.
+            self.invalidate_adapter(adapter)
+            raise
         return BleakConnection(client)

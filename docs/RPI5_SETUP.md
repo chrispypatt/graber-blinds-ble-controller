@@ -93,6 +93,27 @@ progress, and adapter health. A movement command progresses through bounded
 states such as queued, running, awaiting feedback, and a terminal result. A
 write acknowledged by the motor is not treated as proof that it moved.
 
+### Adapter recovery check
+
+Adapters are resolved from their configured controller address and USB path,
+not from the transient `hciN` number. If USB or BlueZ removes a controller, the
+service marks it unavailable, bounds affected work, discards stale BlueZ device
+objects, and automatically returns it to service when the same stable identity
+reappears. It does not fall back to onboard Bluetooth or require a Pi reboot.
+
+To validate recovery without moving a shade:
+
+1. Pause shade automations and confirm no command is active in the control page.
+2. Record the two external adapters with `bluetoothctl list` and `/opt/graber-controller/.venv/bin/python -m graber.diagnostic_cli adapters --expected 2`.
+3. Disconnect one USB adapter, leaving the other attached. Confirm its health
+   becomes `unavailable` while unrelated shades and the service remain available.
+4. Reconnect it to the same USB path. Confirm health returns to `online` without
+   restarting the service, then repeat for the other adapter.
+
+Health includes connection attempts/successes, failures, disconnects,
+recoveries, and the last unavailable/recovered times. This validation performs
+no shade command; do not use Identify or a control button during it.
+
 ### Accounts and recovery
 
 The everyday account can change its own password. If it is inaccessible, sign
@@ -170,6 +191,21 @@ Use broker TLS when it is available; see [Security and privacy](SECURITY.md).
 Never leave two automated controller paths active for the same shade. Follow
 the [cutover and rollback procedure](RPI5_MIGRATION.md#home-assistant-cutover)
 when replacing another controller.
+
+### Alexa through Home Assistant Cloud
+
+MQTT Discovery classifies the native cover entities as shades. Expose those
+covers directly to Alexa for Open, Close, Stop, and supported position commands;
+do not create separate Open/Close/Stop scripts. TDBU shades also receive a
+full-shade cover for verified full Open, full Close, and Stop. Their bottom and
+top rail covers remain available for explicit rail positioning, while the
+full-shade cover intentionally has no arbitrary position control.
+
+In Home Assistant's voice-assistant exposure settings, expose only the native
+shade and group covers you want Alexa to discover. Hide legacy Alexa movement
+scripts and old controller entities, then run Alexa device discovery. Retain a
+narrowly named Favorite script only when that voice action is wanted, because
+Favorite is not a native cover capability.
 
 ## Update or roll back
 

@@ -145,6 +145,9 @@ class MqttBridge:
     def position_topic(self, blind_id: str, rail: str = "bottom") -> str:
         return f"{self.settings.topic_prefix}/blind/{blind_id}/{rail}/position"
 
+    def full_state_topic(self, blind_id: str) -> str:
+        return f"{self.settings.topic_prefix}/blind/{blind_id}/full/state"
+
     def diagnostics_topic(self, blind_id: str) -> str:
         return f"{self.settings.topic_prefix}/blind/{blind_id}/diagnostics"
 
@@ -167,6 +170,7 @@ class MqttBridge:
                     "name": f"{blind.name}{suffix}{self.settings.entity_name_suffix}",
                     "unique_id": entity_id,
                     "device": device,
+                    "device_class": "shade",
                     "command_topic": self.command_topic(blind.blind_id, rail),
                     "set_position_topic": self.set_position_topic(blind.blind_id, rail),
                     "state_topic": self.state_topic(blind.blind_id, rail),
@@ -179,6 +183,25 @@ class MqttBridge:
                 }
                 topic = f"{self.settings.discovery_prefix}/cover/{entity_id}/config"
                 self._publish_discovery(topic, payload)
+
+            if blind.tdbu:
+                entity_id = _slug(f"{self.settings.device_id}_{blind.blind_id}_full")
+                self._publish_discovery(
+                    f"{self.settings.discovery_prefix}/cover/{entity_id}/config",
+                    {
+                        "name": f"{blind.name}{self.settings.entity_name_suffix}",
+                        "unique_id": entity_id,
+                        "device": device,
+                        "device_class": "shade",
+                        "command_topic": self.command_topic(blind.blind_id, "full"),
+                        "state_topic": self.full_state_topic(blind.blind_id),
+                        "availability": self._blind_availability(blind.blind_id),
+                        "availability_mode": "all",
+                        "optimistic": False,
+                    },
+                )
+            else:
+                self._clear_full_discovery(blind.blind_id)
 
             diagnostic_id = _slug(f"{self.settings.device_id}_{blind.blind_id}_diagnostics")
             diagnostic = {
@@ -242,6 +265,7 @@ class MqttBridge:
                     "name": f"{group.name}{self.settings.entity_name_suffix}",
                     "unique_id": entity_id,
                     "device": device,
+                    "device_class": "shade",
                     "command_topic": self.group_command_topic(group.group_id),
                     "availability_topic": self.availability_topic,
                     "payload_available": "online",
@@ -325,6 +349,15 @@ class MqttBridge:
                 retain=True,
             )
 
+    def _clear_full_discovery(self, blind_id: str) -> None:
+        entity_id = _slug(f"{self.settings.device_id}_{blind_id}_full")
+        self.client.publish(
+            f"{self.settings.discovery_prefix}/cover/{entity_id}/config",
+            "",
+            qos=self.settings.qos,
+            retain=True,
+        )
+
     def _publish_action_buttons(
         self,
         target_type: str,
@@ -370,6 +403,10 @@ class MqttBridge:
                 self.client.subscribe(self.command_topic(blind.blind_id, rail), self.settings.qos)
                 self.client.subscribe(
                     self.set_position_topic(blind.blind_id, rail), self.settings.qos
+                )
+            if blind.tdbu:
+                self.client.subscribe(
+                    self.command_topic(blind.blind_id, "full"), self.settings.qos
                 )
         for group in self.groups.values():
             self.client.subscribe(self.group_command_topic(group.group_id), self.settings.qos)
@@ -440,6 +477,8 @@ class MqttBridge:
                 return False
             if command == "STOP":
                 action = "stop"
+            elif rail == "full":
+                action = command.lower()
             elif rail == "top":
                 action = f"{command.lower()}_top"
             elif target_type == "blind" and self.blinds[target_id].tdbu:
@@ -499,9 +538,11 @@ class MqttBridge:
             return None
         blind_id, rail, operation = parts
         blind = self.blinds.get(blind_id)
-        if blind is None or rail not in ({"bottom", "top"} if blind.tdbu else {"bottom"}):
+        if blind is None or rail not in ({"bottom", "top", "full"} if blind.tdbu else {"bottom"}):
             return None
         if operation not in {"command", "set_position"}:
+            return None
+        if rail == "full" and operation != "command":
             return None
         return blind_id, "blind", rail, operation == "set_position"
 
@@ -526,6 +567,10 @@ class MqttBridge:
             self._publish(self.state_topic(blind_id), movement)
         if top_movement is not None:
             self._publish(self.state_topic(blind_id, "top"), top_movement)
+        blind = self.blinds[blind_id]
+        if blind.tdbu and bottom_position is not None and top_position is not None:
+            full_state = "closed" if bottom_position == 0 and top_position == 0 else "open"
+            self._publish(self.full_state_topic(blind_id), full_state)
         if diagnostics is not None:
             self._publish(self.diagnostics_topic(blind_id), diagnostics)
 

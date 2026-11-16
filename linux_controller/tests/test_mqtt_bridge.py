@@ -54,20 +54,32 @@ def make_bridge():
 def test_discovery_is_retained_separate_and_non_optimistic():
     bridge, client, _ = make_bridge()
     bridge.publish_discovery()
-    cover_messages = [item for item in client.published if "/cover/" in item[0]]
-    assert len(cover_messages) == 4
+    cover_messages = [
+        item for item in client.published if "/cover/" in item[0] and item[1]
+    ]
+    assert len(cover_messages) == 5
     assert all(item[3] is True for item in cover_messages)
     payloads = [json.loads(item[1]) for item in cover_messages]
     assert all(payload["optimistic"] is False for payload in payloads)
+    assert all(payload["device_class"] == "shade" for payload in payloads)
     blind_payloads = [payload for payload in payloads if "group_" not in payload["unique_id"]]
     group_payloads = [payload for payload in payloads if "group_" in payload["unique_id"]]
+    rail_payloads = [
+        payload for payload in blind_payloads if not payload["unique_id"].endswith("_full")
+    ]
+    full_payloads = [
+        payload for payload in blind_payloads if payload["unique_id"].endswith("_full")
+    ]
     assert all("state_topic" in payload for payload in blind_payloads)
-    assert all("position_topic" in payload for payload in blind_payloads)
+    assert all("position_topic" in payload for payload in rail_payloads)
+    assert len(full_payloads) == 1
+    assert "position_topic" not in full_payloads[0]
+    assert "set_position_topic" not in full_payloads[0]
     assert all(len(payload["availability"]) == 2 for payload in blind_payloads)
     assert all("state_topic" not in payload and "position_topic" not in payload
                for payload in group_payloads)
     assert all(payload["name"].endswith(" (Test)") for payload in payloads)
-    assert len({payload["unique_id"] for payload in payloads}) == 4
+    assert len({payload["unique_id"] for payload in payloads}) == 5
     battery = [json.loads(item[1]) for item in client.published if "_battery/config" in item[0]]
     assert len(battery) == 2
     assert all(item["device_class"] == "battery" for item in battery)
@@ -206,6 +218,32 @@ def test_tdbu_top_open_and_close_dispatch_explicit_blind_target():
     ]
 
 
+def test_tdbu_full_cover_routes_only_verified_full_open_close_and_stop():
+    bridge, client, controller = make_bridge()
+    bridge.subscribe_commands()
+    assert ("test-pilot/blind/left/full/command", 1) in client.subscribed
+    assert ("test-pilot/blind/left/full/set_position", 1) not in client.subscribed
+
+    for command in ("OPEN", "CLOSE", "STOP"):
+        assert asyncio.run(
+            bridge.handle_message("test-pilot/blind/left/full/command", command)
+        )
+    assert not asyncio.run(
+        bridge.handle_message("test-pilot/blind/left/full/set_position", "50")
+    )
+    assert not asyncio.run(
+        bridge.handle_message("test-pilot/blind/right/full/command", "OPEN")
+    )
+    assert [
+        (target, action, kwargs["position"], kwargs["target_type"])
+        for target, action, kwargs in controller.commands
+    ] == [
+        ("left", "open", None, "blind"),
+        ("left", "close", None, "blind"),
+        ("left", "stop", None, "blind"),
+    ]
+
+
 def test_group_commands_are_discovered_subscribed_and_explicitly_typed():
     bridge, client, controller = make_bridge()
     bridge.subscribe_commands()
@@ -332,6 +370,24 @@ def test_observed_state_is_not_published_until_called():
     )
     assert [item[1] for item in client.published] == ["73", "open", '{"retry_count":1}']
     assert all(item[3] is False for item in client.published)
+
+
+def test_tdbu_full_cover_state_is_derived_only_from_observed_rail_feedback():
+    bridge, client, _ = make_bridge()
+    bridge.publish_observed_state("left", bottom_position=0, top_position=0)
+    assert client.published[-1][:2] == (
+        "test-pilot/blind/left/full/state", "closed"
+    )
+
+    bridge.publish_observed_state("left", bottom_position=0, top_position=31)
+    assert client.published[-1][:2] == (
+        "test-pilot/blind/left/full/state", "open"
+    )
+
+    bridge.publish_observed_state("left", bottom_position=100, top_position=0)
+    assert client.published[-1][:2] == (
+        "test-pilot/blind/left/full/state", "open"
+    )
 
 
 def test_blind_availability_is_retained_and_scoped():
