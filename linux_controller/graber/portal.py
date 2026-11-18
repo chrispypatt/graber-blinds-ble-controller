@@ -10,6 +10,8 @@ import json
 import os
 import signal
 import sys
+import time
+from email.utils import formatdate
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -293,7 +295,8 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
     def set_session_cookie(response: web.StreamResponse, token: str) -> None:
         response.set_cookie(
             auth_manager.cookie_name, token,
-            max_age=int(auth_manager.session_ttl_s), path="/",
+            max_age=int(auth_manager.session_ttl_s),
+            expires=formatdate(time.time() + auth_manager.session_ttl_s, usegmt=True), path="/",
             secure=auth_manager.secure_cookie, httponly=True, samesite="Strict",
         )
 
@@ -303,7 +306,10 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
             secure=auth_manager.secure_cookie, httponly=True, samesite="Strict",
         )
 
-    async def login_page(_request: web.Request) -> web.Response:
+    async def login_page(request: web.Request) -> web.Response:
+        session = auth_manager.get_session(request.cookies.get(auth_manager.cookie_name))
+        if session is not None and not session.setup_required:
+            raise web.HTTPSeeOther("/")
         template = (Path(__file__).parent / "templates" / "auth.html").read_text(encoding="utf-8")
         return web.Response(text=template, content_type="text/html")
 

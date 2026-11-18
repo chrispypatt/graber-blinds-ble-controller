@@ -274,6 +274,15 @@ def test_login_cookie_is_httponly_strict_and_secure_when_configured(tmp_path):
             assert cookie["secure"] is True
             assert cookie["samesite"] == "Strict"
             assert cookie["path"] == "/"
+            assert int(cookie["max-age"]) == 12 * 60 * 60
+            assert cookie["expires"].endswith("GMT")
+            assert "Domain=" not in response.headers["Set-Cookie"]
+            reopened = await client.get(
+                "/login", allow_redirects=False,
+                cookies={manager.cookie_name: cookie.value},
+            )
+            assert reopened.status == 303
+            assert reopened.headers["Location"] == "/"
         finally:
             await client.close()
     asyncio.run(scenario())

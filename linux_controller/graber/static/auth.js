@@ -6,6 +6,31 @@ const button=document.querySelector('#loginButton');
 const accountSetupForm=document.querySelector('#accountSetupForm');
 let csrfToken='';
 
+async function resumeSession(){
+  try{
+    const response=await fetch('/api/auth/session');
+    if(!response.ok)return;
+    const session=await response.json();
+    if(!session.authenticated||button.disabled)return;
+    if(session.role==='recovery'&&session.setup_required){
+      showAccountSetup(session);
+    }else{
+      window.location.replace('/');
+    }
+  }catch{
+    // The sign-in form remains available.
+  }
+}
+
+function showAccountSetup(session){
+  csrfToken=session.csrf_token;
+  form.classList.add('is-hidden');
+  accountSetupForm.classList.remove('is-hidden');
+  document.querySelector('#accountUsername').focus();
+}
+
+void resumeSession();
+
 form.addEventListener('submit',async event=>{
   event.preventDefault();
   error.textContent='';
@@ -25,10 +50,7 @@ form.addEventListener('submit',async event=>{
     try{body=text?JSON.parse(text):{}}catch{body={}}
     if(!response.ok)throw new Error(body.error||'Sign in failed.');
     if(body.role==='recovery'&&body.setup_required){
-      csrfToken=body.csrf_token;
-      form.classList.add('is-hidden');
-      accountSetupForm.classList.remove('is-hidden');
-      document.querySelector('#accountUsername').focus();
+      showAccountSetup(body);
       return;
     }
     window.location.replace('/');
