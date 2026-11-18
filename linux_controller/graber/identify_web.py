@@ -97,11 +97,12 @@ class DeviceSetup:
     id: str
     friendly_name: str
     dual_rail: bool
-    preferred_adapter: str
+    preferred_adapter: str | None
     groups: tuple[str, ...] = ()
     enabled: bool = True
     configured: bool = False
     access_code: str | None = field(default=None, repr=False)
+    loaded_from_disk: bool = False
 
     def browser_dict(self, allow_code_read: bool) -> dict[str, Any]:
         bottom_position = (
@@ -122,6 +123,7 @@ class DeviceSetup:
             "groups": list(self.groups),
             "enabled": self.enabled,
             "configured": self.configured,
+            "loaded_from_disk": self.loaded_from_disk,
             "bottom_raw": self.observation.bottom_raw,
             "top_raw": self.observation.top_raw,
             "bottom_position": bottom_position,
@@ -318,11 +320,22 @@ class SetupSession:
             if group_id in self.groups:
                 continue
             self.groups[group_id] = friendly
-        self.devices: dict[str, DeviceSetup] = {}
+        self.devices = self._saved_devices()
         self.ble_lock = asyncio.Lock()
         self.scan_task: asyncio.Task[None] | None = None
         self.scan_started_at: float | None = None
         self.scan_duration_s: float | None = None
+
+    def _saved_devices(self) -> dict[str, DeviceSetup]:
+        return {
+            opaque_id(address): DeviceSetup(
+                MotorObservation(saved.friendly_name, address),
+                saved.id, saved.friendly_name, saved.dual_rail, saved.preferred_adapter,
+                groups=saved.groups, configured=True, access_code=saved.access_code,
+                loaded_from_disk=True,
+            )
+            for address, saved in self.saved_setup.devices.items()
+        }
 
     async def scan_all(self, seconds: float = 12) -> None:
         if not self.adapters:
@@ -388,7 +401,7 @@ class SetupSession:
         if self.ble_lock.locked():
             raise ValueError("wait for the active Bluetooth operation to finish")
         count = len(self.devices)
-        self.devices.clear()
+        self.devices = self._saved_devices()
         return count
 
     def scan_state(self) -> dict[str, Any]:
@@ -431,19 +444,20 @@ class SetupSession:
             "can_export": bool(self.adapters) and self.export_dir is not None and not self.missing_adapters,
             "missing_adapters": self.missing_adapters,
             "can_exit_setup": bool(self.saved_setup.adapters),
-            "unscanned_saved_devices": len(self._unscanned_saved_devices()),
+            "loaded_saved_devices": len(self.saved_setup.devices),
         }
 
     def configure(self, key: str, body: dict[str, Any]) -> None:
         device = self.devices[key]
+        old_name = device.friendly_name
         device.friendly_name = str(body.get("name", device.friendly_name)).strip() or device.friendly_name
-        generated_id = slug(device.friendly_name)
+        generated_id = device.id if device.friendly_name == old_name else slug(device.friendly_name)
         if any(other is not device and other.id == generated_id for other in self.devices.values()):
             raise ValueError(f"another device already uses generated id {generated_id!r}")
         device.id = generated_id
         device.dual_rail = bool(body.get("dual_rail", device.dual_rail))
-        requested = str(body.get("preferred_adapter", device.preferred_adapter))
-        if requested not in self.adapters and not (
+        requested = body.get("preferred_adapter", device.preferred_adapter) or None
+        if requested is not None and requested not in self.adapters and not (
             requested == device.preferred_adapter and requested in self.saved_setup.adapters
         ):
             raise ValueError("unknown adapter assignment")
@@ -463,7 +477,8 @@ class SetupSession:
                 continue
             if len(friendly) > 60 or not re.search(r"[A-Za-z0-9]", friendly):
                 raise ValueError("group names must contain a letter or number and be at most 60 characters")
-            group_id = slug(friendly)
+            group_id = next((key for key, name in self.groups.items() if name == friendly),
+                            slug(friendly))
             if group_id not in self.groups:
                 self.groups[group_id] = friendly
             if group_id not in normalized_groups:
@@ -497,11 +512,6 @@ class SetupSession:
         except KeyError as exc:
             raise ValueError(f"Bluetooth adapter {adapter_id} is unavailable") from exc
 
-    def _unscanned_saved_devices(self) -> list[SavedDeviceSetup]:
-        scanned = {item.observation.address.upper() for item in self.devices.values()}
-        return [device for address, device in self.saved_setup.devices.items()
-                if address not in scanned]
-
     def export(self) -> tuple[Path, Path]:
         if self.export_dir is None:
             raise ValueError("setup saving was not enabled at launch")
@@ -512,12 +522,11 @@ class SetupSession:
         if not self.adapters:
             raise ValueError("no powered USB Bluetooth adapters available for saving")
         selected = [item for item in self.devices.values() if item.enabled]
-        unchanged = self._unscanned_saved_devices()
         if not selected:
             raise ValueError("no devices have been discovered")
         if any(not item.access_code for item in selected):
             raise ValueError("selected shades need access codes before setup can be saved")
-        blind_ids = [item.id for item in [*selected, *unchanged]]
+        blind_ids = [item.id for item in selected]
         if len(set(blind_ids)) != len(blind_ids):
             raise ValueError("device ids must be unique")
         self.export_dir.mkdir(parents=True, exist_ok=True)
@@ -546,16 +555,16 @@ class SetupSession:
                 settings["fallback_adapters"] = [
                     value for value in adapter_ids if value != item.preferred_adapter
                 ]
-            settings.update(id=item.id, name=item.friendly_name, dual_rail=item.dual_rail,
-                            preferred_adapter=item.preferred_adapter)
+            settings.update(id=item.id, name=item.friendly_name, dual_rail=item.dual_rail)
+            if item.preferred_adapter is None:
+                settings.pop("preferred_adapter", None)
+            else:
+                settings["preferred_adapter"] = item.preferred_adapter
             lines.extend(_serialize_toml_row("blinds", settings))
             credentials = dict(saved.secrets) if saved else {}
             credentials.update(address=address, access_code=item.access_code)
             secret_rows[item.id] = credentials
-        for item in unchanged:
-            lines.extend(_serialize_toml_row("blinds", item.config))
-            secret_rows[item.id] = item.secrets
-        for item in [*selected, *unchanged]:
+        for item in selected:
             for group in item.groups:
                 groups.setdefault(group, []).append(item.id)
         for group, members in groups.items():

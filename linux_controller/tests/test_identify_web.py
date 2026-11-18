@@ -327,7 +327,12 @@ control_token = "0123456789abcdef"
         groups=("new_room",), configured=True, access_code="0123456",
     )
     session.groups["new_room"] = "New Room"
-    assert session.state(allow_jog=False)["unscanned_saved_devices"] == 1
+    payload = session.state(allow_jog=False)
+    assert payload["loaded_saved_devices"] == 2
+    restored = next(device for device in payload["devices"] if device["loaded_from_disk"])
+    assert restored["configured"] and restored["has_access_code"]
+    assert restored["bottom_position"] is None and restored["rssi_median"] is None
+    assert "access_code" not in restored
 
     exported_config, exported_secrets = session.export()
     loaded = load_config(exported_config, exported_secrets)
