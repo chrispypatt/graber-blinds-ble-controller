@@ -3,6 +3,8 @@ import stat
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from graber.config import load_config
 from graber.diagnostics import AdapterIdentity
 from graber.identify_cli import MotorObservation
@@ -59,6 +61,41 @@ def test_explicit_adapter_selection_is_exact_and_validated():
         assert "unavailable" in str(exc)
     else:
         raise AssertionError("an unavailable explicit controller must fail")
+
+
+def test_partial_setup_keeps_assignments_and_refuses_export(tmp_path: Path, monkeypatch):
+    original, key = make_session(tmp_path)
+    original.configure(key, {"access_code": "0123456", "name": "Living Left"})
+    original.adapters["other_adapter"] = AdapterIdentity(
+        "hci5", "AA:BB:CC:DD:EE:00", True, "1234", "5678", usb_path="1-2.4",
+    )
+    config_path, secrets_path = original.export()
+    original_config = config_path.read_bytes()
+    original_secrets = secrets_path.read_bytes()
+    saved = load_saved_setup(config_path, secrets_path)
+    adapters = select_usb_adapters(
+        [original.adapters["other_adapter"]],
+        ["AA:BB:CC:DD:EE:00", "AA:BB:CC:DD:EE:FF"],
+        allow_partial=True,
+    )
+    partial = SetupSession(adapters, export_dir=tmp_path, saved_setup=saved)
+
+    async def fake_scan(_adapter, _seconds):
+        return [original.devices[key].observation]
+
+    monkeypatch.setattr("graber.identify_web.scan", fake_scan)
+    asyncio.run(partial.scan_all())
+    payload = partial.state(allow_jog=False)
+    assert payload["missing_adapters"] == 1
+    assert payload["can_export"] is False
+    assert payload["can_exit_setup"] is True
+    assert payload["devices"][0]["preferred_adapter"] == "usb_1_2_3"
+    assert next(adapter for adapter in payload["adapters"]
+                if adapter["id"] == "usb_1_2_3")["powered"] is False
+    with pytest.raises(ValueError, match="Restore all configured Bluetooth adapters"):
+        partial.export()
+    assert config_path.read_bytes() == original_config
+    assert secrets_path.read_bytes() == original_secrets
 
 
 def test_setup_configuration_never_returns_access_code_to_browser(tmp_path: Path):
@@ -219,17 +256,30 @@ jitter_s = 0.1
 id = "usb_1_2_3"
 controller_address = "AA:BB:CC:DD:EE:FF"
 usb_path = "1-2.3"
+max_connections = 4
+max_cold_connections = 2
+cold_start_spacing_s = 0.4
+auto_recover_power = true
 
 [[blinds]]
 id = "old_name"
 name = "Old Name"
 dual_rail = false
 preferred_adapter = "usb_1_2_3"
+battery_interval_s = 5000
+
+[[blinds]]
+id = "unseen"
+name = "Unseen Window"
+preferred_adapter = "usb_1_2_3"
 
 [[groups]]
 id = "old_room"
 name = "Old Room"
-members = ["old_name"]
+members = ["old_name", "unseen"]
+mode = "synchronized"
+prepare_timeout_s = 15.5
+partial_failure = "abort"
 
 [mqtt]
 enabled = true
@@ -252,6 +302,10 @@ custom_flag = "keep-me"
 address = "11:22:33:44:55:66"
 access_code = "0123456"
 
+[blinds.unseen]
+address = "11:22:33:44:55:67"
+access_code = "1234567"
+
 [mqtt]
 username = "controller"
 password = "mqtt-secret"
@@ -263,7 +317,7 @@ control_token = "0123456789abcdef"
     secrets_path.chmod(0o600)
     saved = load_saved_setup(config_path, secrets_path)
     adapter = AdapterIdentity(
-        "hci4", "AA:BB:CC:DD:EE:FF", True, "1234", "5678", usb_path="1-2.3"
+        "hci4", "AA:BB:CC:DD:EE:FF", True, "1234", "5678", usb_path="3-1"
     )
     session = SetupSession([adapter], export_dir=tmp_path, saved_setup=saved)
     observation = MotorObservation("RRBZ_TEST", "11:22:33:44:55:66", [-60], 40, 0)
@@ -273,6 +327,7 @@ control_token = "0123456789abcdef"
         groups=("new_room",), configured=True, access_code="0123456",
     )
     session.groups["new_room"] = "New Room"
+    assert session.state(allow_jog=False)["unscanned_saved_devices"] == 1
 
     exported_config, exported_secrets = session.export()
     loaded = load_config(exported_config, exported_secrets)
@@ -290,9 +345,24 @@ control_token = "0123456789abcdef"
     assert loaded.web.port == 8181
     assert loaded.web.control_token == "0123456789abcdef"
     assert loaded.blinds[0].id == "new_name"
+    assert loaded.blinds[0].preferred_adapter == "usb_1_2_3"
+    assert loaded.blinds[0].battery_interval_s == 5000
+    assert loaded.blinds[1].id == "unseen"
+    assert loaded.blinds[1].access_code == "1234567"
+    assert loaded.adapters[0].id == "usb_1_2_3"
+    assert loaded.adapters[0].usb_path == "3-1"
+    assert loaded.adapters[0].max_connections == 4
+    assert loaded.adapters[0].max_cold_connections == 2
+    assert loaded.adapters[0].cold_start_spacing_s == 0.4
     assert loaded.groups[0].id == "new_room"
+    assert loaded.groups[1].members == ("unseen",)
+    assert loaded.groups[1].mode == "synchronized"
+    assert loaded.groups[1].partial_failure == "abort"
+    assert loaded.groups[1].prepare_timeout_s == 15.5
     with exported_config.open("rb") as stream:
-        assert tomllib.load(stream)["extension"]["custom_flag"] == "keep-me"
+        exported = tomllib.load(stream)
+        assert exported["extension"]["custom_flag"] == "keep-me"
+        assert exported["adapters"][0]["auto_recover_power"] is True
 
 
 def test_scan_can_be_cancelled_and_cleaned_up(tmp_path: Path):
@@ -517,3 +587,17 @@ def test_web_jog_calls_injected_runner_only_when_enabled(tmp_path: Path):
         finally:
             await client.close()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("addresses", [None, ["AA:BB:CC:DD:EE:FF"]])
+def test_setup_without_powered_adapters_can_open_but_cannot_scan_or_save(tmp_path, addresses):
+    adapters = select_usb_adapters([], addresses, allow_partial=True)
+    session = SetupSession(adapters, export_dir=tmp_path, missing_adapters=len(addresses or []))
+    payload = session.state(allow_jog=False)
+    assert payload["adapters"] == []
+    assert payload["missing_adapters"] == len(addresses or [])
+    assert payload["can_export"] is False
+    with pytest.raises(ValueError, match="no powered USB Bluetooth adapters"):
+        asyncio.run(session.scan_all())
+    with pytest.raises(ValueError, match="adapter"):
+        session.export()

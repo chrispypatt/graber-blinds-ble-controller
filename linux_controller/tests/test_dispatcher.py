@@ -79,7 +79,7 @@ def test_dispatcher_telemetry_measures_queue_and_execution_time():
             blind, telemetry=lambda event, fields: events.append((event, fields))
         )
         first = asyncio.create_task(dispatcher.submit(
-            BlindCommand("first", CommandKind.FULL_OPEN)
+            BlindCommand("first", CommandKind.STOP)
         ))
         await blind.first_started.wait()
         second = asyncio.create_task(dispatcher.submit(
@@ -113,11 +113,12 @@ def test_dispatcher_telemetry_records_queue_full_and_stop_supersession():
 
         def __init__(self):
             self.started = asyncio.Event()
+            self.release = asyncio.Event()
 
         async def execute(self, command):
-            if command.kind is not CommandKind.STOP:
+            if command.id == "first-stop":
                 self.started.set()
-                await asyncio.Event().wait()
+                await self.release.wait()
             return CommandResult(command.id, "blind", Outcome.COMPLETED)
 
         async def close(self):
@@ -129,8 +130,8 @@ def test_dispatcher_telemetry_records_queue_full_and_stop_supersession():
             BlockingBlind(), max_queue=1,
             telemetry=lambda event, fields: events.append((event, fields)),
         )
-        moving = asyncio.create_task(dispatcher.submit(
-            BlindCommand("moving", CommandKind.FULL_OPEN)
+        first_stop = asyncio.create_task(dispatcher.submit(
+            BlindCommand("first-stop", CommandKind.STOP)
         ))
         await dispatcher.blind.started.wait()
         queued = asyncio.create_task(dispatcher.submit(
@@ -143,14 +144,18 @@ def test_dispatcher_telemetry_records_queue_full_and_stop_supersession():
             assert "queue full" in str(exc)
         else:
             raise AssertionError("overflow should be rejected")
-        await dispatcher.submit(BlindCommand("stop", CommandKind.STOP))
-        await asyncio.gather(moving, queued)
+        stop = asyncio.create_task(dispatcher.submit(
+            BlindCommand("stop", CommandKind.STOP)
+        ))
+        await asyncio.sleep(0)
+        dispatcher.blind.release.set()
+        await asyncio.gather(first_stop, stop, queued)
 
         assert any(event == "dispatcher_queue_full" and fields["command_id"] == "overflow"
                    for event, fields in events)
         superseded = [fields for event, fields in events
                       if event == "dispatcher_command_completed" and fields["superseded"]]
-        assert {item["command_id"] for item in superseded} == {"moving", "queued"}
+        assert {item["command_id"] for item in superseded} == {"queued"}
         await dispatcher.close()
 
     asyncio.run(scenario())
@@ -191,11 +196,10 @@ def test_stop_preempts_running_command_and_supersedes_queued_work():
         running = asyncio.create_task(dispatcher.submit(
             BlindCommand("open", CommandKind.FULL_OPEN)
         ))
-        await blind.started.wait()
         queued = asyncio.create_task(dispatcher.submit(
             BlindCommand("close", CommandKind.FULL_CLOSE)
         ))
-        await asyncio.sleep(0)
+        await blind.started.wait()
 
         stopped = await asyncio.wait_for(dispatcher.submit(
             BlindCommand("stop", CommandKind.STOP)
@@ -210,6 +214,63 @@ def test_stop_preempts_running_command_and_supersedes_queued_work():
         assert blind.calls == [CommandKind.FULL_OPEN, CommandKind.STOP]
         assert blind.cancelled == [CommandKind.FULL_OPEN]
         assert blind.max_active == 1
+        await dispatcher.close()
+
+    asyncio.run(scenario())
+
+
+def test_conflicting_command_stops_motion_and_discards_both_requests():
+    class BlockingBlind(FakeBlind):
+        def __init__(self):
+            self.move_started = asyncio.Event()
+            self.stop_started = asyncio.Event()
+            self.release_stop = asyncio.Event()
+            self.calls = []
+
+        async def execute(self, command):
+            self.calls.append(command)
+            if command.id == "move":
+                self.move_started.set()
+                await asyncio.Event().wait()
+            if command.kind is CommandKind.STOP:
+                self.stop_started.set()
+                await self.release_stop.wait()
+            return CommandResult(command.id, "blind", Outcome.COMPLETED)
+
+    async def scenario():
+        blind = BlockingBlind()
+        dispatcher = BlindDispatcher(blind, dedupe_size=1)
+        original = BlindCommand("move", CommandKind.FULL_OPEN)
+        running = asyncio.create_task(dispatcher.submit(original))
+        await blind.move_started.wait()
+        duplicate = asyncio.create_task(dispatcher.submit(original))
+        await asyncio.sleep(0)
+        assert [command.kind for command in blind.calls] == [CommandKind.FULL_OPEN]
+
+        conflict = BlindCommand("conflict", CommandKind.SET_POSITION, position=70)
+        stopping = asyncio.create_task(dispatcher.submit(conflict))
+        await asyncio.wait_for(blind.stop_started.wait(), 1)
+        burst_result = await dispatcher.submit(BlindCommand("burst", CommandKind.FULL_CLOSE))
+        assert burst_result.outcome is Outcome.FAILED
+        assert not stopping.done()
+        duplicate_conflict = asyncio.create_task(dispatcher.submit(conflict))
+        await asyncio.sleep(0)
+        assert not duplicate_conflict.done()
+        blind.release_stop.set()
+
+        original_result, duplicate_result, conflict_result, duplicate_stop_result = await asyncio.gather(
+            running, duplicate, stopping, duplicate_conflict,
+        )
+        for result in (original_result, duplicate_result, conflict_result,
+                       duplicate_stop_result, burst_result):
+            assert result.outcome is Outcome.FAILED
+            assert result.error == "superseded by stop command conflict"
+        assert blind.calls[1].kind is CommandKind.STOP
+        assert blind.calls[1].position is None
+        assert len(blind.calls) == 2
+        assert (await dispatcher.submit(conflict)).outcome is Outcome.DUPLICATE
+        subsequent = await dispatcher.submit(BlindCommand("next", CommandKind.FULL_CLOSE))
+        assert subsequent.outcome is Outcome.COMPLETED
         await dispatcher.close()
 
     asyncio.run(scenario())

@@ -2,13 +2,16 @@ import asyncio
 import json
 import time
 
+import pytest
+
 from graber.adapter_manager import AdapterManager, ResolvedAdapter
 from graber.ble_transport import DiscoveredDevice
 from graber.blind import BlindCommand, BlindController, Outcome
 from graber.config import AdapterConfig, BlindConfig, RetryConfig
+from graber.dispatcher import BlindDispatcher
 from graber.protocol import (
     AUTH_CHARACTERISTIC, BATTERY_CHARACTERISTIC, BOTTOM_POSITION_CHARACTERISTIC, BOTTOM_TARGET_CHARACTERISTIC,
-    TOP_POSITION_CHARACTERISTIC, CommandKind, Rail,
+    EXECUTE_CHARACTERISTIC, TOP_POSITION_CHARACTERISTIC, CommandKind, Rail,
 )
 
 
@@ -96,6 +99,69 @@ def test_connect_subscribe_auth_then_verified_command():
         assert BOTTOM_POSITION_CHARACTERISTIC in connection.notifications
         assert result.adapter_id == "external"
         await blind.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stop_write_fails", [False, True])
+def test_dispatcher_conflict_cancels_target_write_and_sends_dual_rail_stop(stop_write_fails):
+    class BlockingTargetConnection(FakeConnection):
+        def __init__(self):
+            super().__init__(reads={
+                BOTTOM_POSITION_CHARACTERISTIC: b"\x2a",
+                TOP_POSITION_CHARACTERISTIC: b"\x64",
+            }, fail_on_write=4 if stop_write_fails else None)
+            self.target_started = asyncio.Event()
+            self.target_cancelled = False
+
+        async def write(self, characteristic, value):
+            await super().write(characteristic, value)
+            if characteristic == BOTTOM_TARGET_CHARACTERISTIC:
+                self.target_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.target_cancelled = True
+                    raise
+
+    async def scenario():
+        connection = BlockingTargetConnection()
+        blind = make_controller(connection, dual=True, feedback_timeout=0.5)
+        dispatcher = BlindDispatcher(blind)
+        try:
+            movement = asyncio.create_task(dispatcher.submit(
+                BlindCommand("first", CommandKind.SET_POSITION, Rail.BOTTOM, 42)
+            ))
+            await asyncio.wait_for(connection.target_started.wait(), 1)
+            blind._last_change = time.monotonic() - 3
+            conflict = await asyncio.wait_for(dispatcher.submit(
+                BlindCommand("second", CommandKind.SET_POSITION, Rail.TOP, 90)
+            ), 2)
+            original = await asyncio.wait_for(movement, 1)
+            assert original.outcome is Outcome.FAILED
+            assert original.error == "superseded by stop command second"
+            assert connection.target_cancelled
+            assert connection.writes == [
+                (AUTH_CHARACTERISTIC, b"0123456"),
+                (BOTTOM_TARGET_CHARACTERISTIC, b"\x2a"),
+                (AUTH_CHARACTERISTIC, b"\x10"),
+                (EXECUTE_CHARACTERISTIC, b"\x10"),
+            ]
+
+            if stop_write_fails:
+                assert conflict.outcome is Outcome.COMPLETION_UNCONFIRMED
+                assert not connection.connected
+                runtime, = await blind._adapters.candidates(blind.config)
+                for _ in range(2):
+                    await asyncio.wait_for(runtime.connection_slots.acquire(), 1)
+                for _ in range(2):
+                    runtime.connection_slots.release()
+            else:
+                assert conflict.outcome is Outcome.FAILED
+                assert conflict.error == "superseded by stop command second"
+                assert connection.connected
+        finally:
+            await dispatcher.close()
+
     asyncio.run(scenario())
 
 

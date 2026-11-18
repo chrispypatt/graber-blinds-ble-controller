@@ -8,6 +8,7 @@ import json
 import logging
 import signal
 from contextlib import suppress
+from functools import partial
 from datetime import datetime, timezone
 
 from .adapter_manager import AdapterManager
@@ -81,7 +82,10 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
         controller = controller_ref.get("controller")
         if controller is not None:
             publish_command_lifecycle(controller, event, fields)
+    from .adapter_recovery import recover_adapter_power
+
     manager = AdapterManager(config.adapters, resolve_configured_adapters)
+    recovery_resolver = partial(resolve_configured_adapters, recover_power=recover_adapter_power)
     await manager.refresh()
     transport = BleakTransport()
     dispatchers: dict[str, BlindDispatcher] = {}
@@ -245,7 +249,7 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
     async def refresh_adapter_health() -> None:
         while True:
             await asyncio.sleep(30)
-            await manager.refresh()
+            await manager.refresh(resolver=recovery_resolver)
             if bridge:
                 for adapter_id, health in manager.health().items():
                     bridge.publish_adapter_health(adapter_id, health)

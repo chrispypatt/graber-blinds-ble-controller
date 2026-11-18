@@ -273,3 +273,30 @@ def test_mixed_legacy_and_stage_records_keep_old_sample_without_new_duplicates()
     timing = summary["latencies"]["connection_latency_ms"]
     assert timing["samples"] == 2
     assert timing["median"] == 1500
+
+
+@pytest.mark.asyncio
+async def test_runtime_recovers_moved_adapter_and_preserves_logical_id(monkeypatch):
+    from graber.config import AdapterConfig
+    from graber.diagnostics import resolve_configured_adapters
+
+    adapter = AdapterIdentity("hci1", "AA:BB:CC:DD:EE:01", False, "0a12", "0001", usb_path="3-1")
+    monkeypatch.setattr("graber.diagnostics.discover_adapters", lambda: [adapter])
+    attempts = []
+
+    def recover(candidate):
+        attempts.append(candidate)
+        return True
+
+    default = AdapterConfig("living", adapter.address, "1-2")
+    assert await resolve_configured_adapters((default,), recover_power=recover) == []
+    assert attempts == []
+    opted_in = AdapterConfig("living", adapter.address, "1-2", auto_recover_power=True)
+    [resolved] = await resolve_configured_adapters((opted_in,), recover_power=recover)
+    assert (resolved.id, resolved.device, resolved.usb_path) == ("living", "hci1", "3-1")
+    assert attempts == [adapter]
+
+    duplicate = AdapterIdentity("hci2", adapter.address, True, "0a12", "0001", usb_path="2-1")
+    monkeypatch.setattr("graber.diagnostics.discover_adapters", lambda: [adapter, duplicate])
+    assert await resolve_configured_adapters((opted_in,), recover_power=recover) == []
+    assert attempts == [adapter]

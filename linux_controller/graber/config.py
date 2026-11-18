@@ -37,6 +37,7 @@ class AdapterConfig:
     max_connections: int = 5
     max_cold_connections: int = 1
     cold_start_spacing_s: float = 0.0
+    auto_recover_power: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ def load_config(config_path: str | Path, secrets_path: str | Path) -> Controller
             max_connections=int(item.get("max_connections", 5)),
             max_cold_connections=int(item.get("max_cold_connections", 1)),
             cold_start_spacing_s=float(item.get("cold_start_spacing_s", 0)),
+            auto_recover_power=item.get("auto_recover_power", False),
         )
         for item in _table_list(raw, "adapters")
     )
@@ -201,6 +203,8 @@ def _validate(config: ControllerConfig) -> None:
     if config.metrics_max_bytes < 100_000:
         raise ConfigError("controller.metrics_max_bytes must be at least 100000")
     for adapter in config.adapters:
+        if not isinstance(adapter.auto_recover_power, bool):
+            raise ConfigError(f"adapter {adapter.id} auto_recover_power must be a boolean")
         if adapter.max_connections < 1 or adapter.max_cold_connections < 1:
             raise ConfigError(f"adapter {adapter.id} limits must be positive")
         if not 0 <= adapter.cold_start_spacing_s <= 10:

@@ -25,6 +25,8 @@ usb_path = "1-1.2"
 max_connections = 5
 max_cold_connections = 1
 cold_start_spacing_s = 0
+# Opt in only for a dedicated controller that should recover from a software radio block.
+auto_recover_power = false
 
 [[adapters]]
 id = "external_b"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -92,10 +93,10 @@ class AdapterManager:
             for adapter_id, runtime in self._runtime.items()
         }
 
-    async def refresh(self) -> None:
+    async def refresh(self, *, resolver: Resolver | None = None) -> None:
         async with self._refresh_lock:
             try:
-                resolved = {item.id: item for item in await self._resolver(self._configs)}
+                resolved = {item.id: item for item in await (resolver or self._resolver)(self._configs)}
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 # Resolution failure means controller state is unknown, not
@@ -115,7 +116,13 @@ class AdapterManager:
                     continue
                 if current is not None:
                     # A controller can return with a different transient hci name.
-                    # Its configured address/USB path remains the identity.
+                    # Keep the logical adapter ID when its physical path changes.
+                    if (runtime.config.usb_path and current.usb_path != runtime.config.usb_path
+                            and (previous is None or previous.usb_path != current.usb_path)):
+                        logging.getLogger("graber").warning(
+                            "adapter %s USB path changed from %s to %s",
+                            adapter_id, runtime.config.usb_path, current.usb_path,
+                        )
                     rebound = previous is not None and previous.device != current.device
                     recovered = previous is None and runtime.stats.last_unavailable is not None
                     if rebound or recovered:

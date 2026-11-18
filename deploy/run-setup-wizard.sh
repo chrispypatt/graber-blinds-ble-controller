@@ -43,16 +43,6 @@ port=${bind_port:-${GRABER_SETUP_PORT:-8090}}
 allowed_networks=${bind_allowed_networks:-$GRABER_SETUP_ALLOWED_NETWORKS}
 export PYTHONPATH=${GRABER_SETUP_PYTHONPATH:-$GRABER_SETUP_SOURCE_DIR}
 controller_addresses=${GRABER_SETUP_CONTROLLER_ADDRESSES:-auto}
-if [ "$controller_addresses" = auto ]; then
-  controller_addresses=$(
-    "$python" -c 'from graber.diagnostics import discover_adapters; print(",".join(x.address for x in discover_adapters() if x.is_usb and x.powered is True and x.address))'
-  )
-  if [ -z "$controller_addresses" ]; then
-    echo "no powered external USB Bluetooth adapters found" >&2
-    exit 1
-  fi
-fi
-
 set -- "$python" -m graber.identify_web \
   --host "$host" --port "$port" --export-dir "$GRABER_SETUP_EXPORT_DIR"
 
@@ -71,9 +61,11 @@ IFS=,
 for network in $allowed_networks; do
   set -- "$@" --allowed-network "$network"
 done
-for address in $controller_addresses; do
-  set -- "$@" --controller-address "$address"
-done
+if [ "$controller_addresses" != auto ]; then
+  for address in $controller_addresses; do
+    set -- "$@" --controller-address "$address"
+  done
+fi
 if [ -n "${GRABER_SETUP_GROUP_NAMES:-}" ]; then
   for group_name in $GRABER_SETUP_GROUP_NAMES; do
     set -- "$@" --group-name "$group_name"

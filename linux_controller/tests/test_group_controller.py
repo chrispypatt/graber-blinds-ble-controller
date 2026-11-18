@@ -2,6 +2,7 @@ import asyncio
 
 from graber.blind import CommandResult, Outcome
 from graber.config import GroupConfig
+from graber.dispatcher import BlindDispatcher
 from graber.group_controller import Controller, GroupResult, parse_action
 from graber.protocol import CommandKind, Rail
 
@@ -43,6 +44,9 @@ class FakeDispatcher:
     async def submit(self, command):
         self.commands.append(command)
         return CommandResult(command.id, self.blind.config.id, self.outcome)
+
+    async def submit_if_busy(self, command):
+        return None
 
     async def close(self):
         pass
@@ -295,6 +299,70 @@ def test_synchronized_group_stop_skips_readiness_preparation():
         assert result.successful
         assert all(item.blind.prepare_calls == 0 for item in dispatchers.values())
         assert all(item.commands[0].kind is CommandKind.STOP for item in dispatchers.values())
+    asyncio.run(scenario())
+
+
+def test_synchronized_group_interrupts_busy_member_before_preparing_other_members():
+    class MovingBlind(FakeBlind):
+        def __init__(self):
+            super().__init__("moving")
+            self.commands = []
+            self.move_started = asyncio.Event()
+            self.stop_started = asyncio.Event()
+
+        async def execute(self, command):
+            self.commands.append(command)
+            if command.kind is CommandKind.STOP:
+                self.stop_started.set()
+            else:
+                self.move_started.set()
+                await asyncio.Event().wait()
+            return CommandResult(command.id, self.config.id, Outcome.COMPLETED)
+
+        async def close(self):
+            pass
+
+    async def scenario():
+        moving_blind = MovingBlind()
+        moving = BlindDispatcher(moving_blind)
+        idle = FakeDispatcher("idle")
+        preparing = asyncio.Event()
+        release = asyncio.Event()
+
+        async def prepare_idle():
+            preparing.set()
+            await release.wait()
+
+        idle.blind.prepare = prepare_idle
+        group = GroupConfig("group", "Group", ("moving", "idle"), "synchronized", 2)
+        controller = Controller({"moving": moving, "idle": idle}, (group,))
+        remote = asyncio.create_task(controller.submit_command(
+            "moving", "open", command_id="remote",
+        ))
+        await asyncio.wait_for(moving_blind.move_started.wait(), 1)
+        grouped = asyncio.create_task(controller.submit_command(
+            "group", "close", command_id="group-close",
+        ))
+        try:
+            await asyncio.wait_for(preparing.wait(), 1)
+            await asyncio.wait_for(moving_blind.stop_started.wait(), 1)
+            assert (await remote).outcome is Outcome.FAILED
+            assert moving_blind.prepare_calls == 0
+            assert idle.commands == []
+            assert not grouped.done()
+
+            release.set()
+            result = await asyncio.wait_for(grouped, 1)
+            assert result.results["moving"].outcome is Outcome.FAILED
+            assert result.results["idle"].outcome is Outcome.COMPLETED
+            assert [item.kind for item in moving_blind.commands] == [
+                CommandKind.FULL_OPEN, CommandKind.STOP,
+            ]
+            assert [item.kind for item in idle.commands] == [CommandKind.FULL_CLOSE]
+        finally:
+            release.set()
+            await moving.close()
+
     asyncio.run(scenario())
 
 

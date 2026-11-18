@@ -26,10 +26,20 @@ or control children. Password records contain salted hashes for a recovery
 administrator and a separate everyday owner account. For HTTPS, place a trusted
 reverse proxy in front of the loopback-bound portal; see `../docs/RPI5_SETUP.md`.
 
-Configured Bluetooth controllers are tracked by stable address/USB identity,
-not `hciN`. Lost adapters are marked unavailable and automatically rebound after
-they return; queued connection work remains bounded and the onboard controller
-is never selected implicitly.
+Configured Bluetooth controllers keep their logical IDs when BlueZ renumbers
+them or when a unique configured USB adapter moves to another port. The saved
+USB path disambiguates matching adapters. The controller refreshes discovery
+periodically and logs when it uses a different path. Set
+`auto_recover_power = true` on a dedicated adapter to let it clear that
+adapter's software radio block and request power through BlueZ. The service
+account needs permission for both operations. Recovery leaves hardware blocks
+in effect.
+
+If a new command ID arrives while a blind is executing a command, the
+dispatcher replaces the new request with a STOP and discards both requests.
+Resubmitting an existing command ID remains idempotent. An explicit STOP
+retains its normal result, while movement requests during a conflict STOP are
+discarded. Check the returned result to confirm the STOP succeeded.
 
 MQTT Discovery publishes native Home Assistant shade covers, including a
 command-only full-shade Open/Close/Stop cover for each TDBU motor alongside its

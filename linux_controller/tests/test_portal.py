@@ -74,7 +74,7 @@ def test_portal_tracks_explicit_blind_and_group_command_routes():
     assert not is_command_request("GET", "/api/blinds/shared/commands")
 
 
-def test_edit_setup_requires_token_and_waits_for_commands(tmp_path):
+def test_setup_mode_switches_require_token_and_wait_for_operations(tmp_path):
     class FakeSupervisor:
         mode = "control"
         active_commands = 0
@@ -83,6 +83,10 @@ def test_edit_setup_requires_token_and_waits_for_commands(tmp_path):
 
         def __init__(self):
             self.switched = []
+            self.config_path = tmp_path / "config.toml"
+            self.secrets_path = tmp_path / "secrets.toml"
+            self.exiting_setup = asyncio.Event()
+            self.allow_exit = asyncio.Event()
 
         def control_token(self):
             return "private-token"
@@ -94,6 +98,9 @@ def test_edit_setup_requires_token_and_waits_for_commands(tmp_path):
             pass
 
         async def switch(self, mode):
+            if mode == "control":
+                self.exiting_setup.set()
+                await self.allow_exit.wait()
             self.mode = mode
             self.switched.append(mode)
 
@@ -122,6 +129,26 @@ def test_edit_setup_requires_token_and_waits_for_commands(tmp_path):
             )
             assert accepted.status == 200
             assert supervisor.switched == ["setup"]
+            assert (await client.post("/api/portal/control")).status == 403
+            headers = {"X-CSRF-Token": auth["csrf_token"]}
+            assert (await client.post("/api/portal/control", headers=headers)).status == 409
+            supervisor.config_path.touch()
+            supervisor.secrets_path.touch()
+            supervisor.active_commands = 1
+            assert (await client.post("/api/portal/control", headers=headers)).status == 409
+            assert supervisor.switched == ["setup"]
+            supervisor.active_commands = 0
+            exiting = asyncio.create_task(client.post("/api/portal/control", headers=headers))
+            try:
+                await asyncio.wait_for(supervisor.exiting_setup.wait(), 1)
+                assert (await client.post("/api/scan", headers=headers, json={})).status == 409
+                assert (await client.post("/api/export", headers=headers, json={})).status == 409
+            finally:
+                supervisor.allow_exit.set()
+                response = await exiting
+            assert response.status == 200
+            assert await response.json() == {"mode": "control"}
+            assert supervisor.switched == ["setup", "control"]
         finally:
             await client.close()
 

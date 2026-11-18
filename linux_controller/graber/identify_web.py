@@ -140,6 +140,8 @@ class SavedDeviceSetup:
     preferred_adapter: str | None
     groups: tuple[str, ...]
     access_code: str = field(repr=False)
+    config: dict[str, Any] = field(default_factory=dict, repr=False)
+    secrets: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,8 @@ class SavedSetup:
     groups: dict[str, str]
     config_base: dict[str, Any] = field(default_factory=dict, repr=False)
     secrets_base: dict[str, Any] = field(default_factory=dict, repr=False)
+    adapters: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    group_configs: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
 
 
 def load_saved_setup(config_path: str | Path, secrets_path: str | Path) -> SavedSetup:
@@ -158,9 +162,10 @@ def load_saved_setup(config_path: str | Path, secrets_path: str | Path) -> Saved
         config_base = tomllib.load(stream)
     with Path(secrets_path).open("rb") as stream:
         secrets_base = tomllib.load(stream)
-    for topology_key in ("adapters", "blinds", "groups"):
-        config_base.pop(topology_key, None)
-    secrets_base.pop("blinds", None)
+    adapters = {row["id"]: row for row in config_base.pop("adapters", [])}
+    blind_configs = {row["id"]: row for row in config_base.pop("blinds", [])}
+    group_configs = {row["id"]: row for row in config_base.pop("groups", [])}
+    blind_secrets = secrets_base.pop("blinds", {})
     memberships: dict[str, list[str]] = {blind.id: [] for blind in config.blinds}
     groups = {group.id: group.name for group in config.groups}
     for group in config.groups:
@@ -174,11 +179,14 @@ def load_saved_setup(config_path: str | Path, secrets_path: str | Path) -> Saved
             preferred_adapter=blind.preferred_adapter,
             groups=tuple(memberships[blind.id]),
             access_code=blind.access_code,
+            config=blind_configs[blind.id],
+            secrets=blind_secrets[blind.id],
         )
         for blind in config.blinds
     }
     return SavedSetup(devices=devices, groups=groups,
-                      config_base=config_base, secrets_base=secrets_base)
+                      config_base=config_base, secrets_base=secrets_base, adapters=adapters,
+                      group_configs=group_configs)
 
 
 def _toml_key(value: str) -> str:
@@ -222,6 +230,12 @@ def _serialize_toml_tables(raw: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _serialize_toml_row(table: str, row: dict[str, Any]) -> list[str]:
+    return [f"[[{table}]]", *(
+        f"{_toml_key(key)} = {_toml_value(value)}" for key, value in row.items()
+    ), ""]
+
+
 def _write_text_no_follow(path: Path, content: str, mode: int) -> None:
     """Replace a generated file without following an attacker-controlled symlink."""
 
@@ -246,18 +260,19 @@ def _write_text_no_follow(path: Path, content: str, mode: int) -> None:
 
 
 def select_usb_adapters(discovered: list[AdapterIdentity],
-                        controller_addresses: list[str] | None) -> list[AdapterIdentity]:
+                        controller_addresses: list[str] | None, *,
+                        allow_partial: bool = False) -> list[AdapterIdentity]:
     """Select powered USB controllers, or validate an explicit address selection."""
 
     available = [item for item in discovered if item.is_usb and item.powered is True]
     if not controller_addresses:
-        if not available:
+        if not available and not allow_partial:
             raise ValueError("no powered USB Bluetooth adapters found")
         return available
     wanted = {value.upper() for value in controller_addresses}
     selected = [item for item in available if (item.address or "").upper() in wanted]
     found = {(item.address or "").upper() for item in selected}
-    if found != wanted:
+    if found != wanted and not allow_partial:
         raise ValueError(f"configured USB controller(s) unavailable: {sorted(wanted - found)}")
     return selected
 
@@ -267,12 +282,31 @@ class SetupSession:
                  export_dir: str | Path | None = None,
                  known_credentials: dict[str, str] | None = None,
                  group_names: tuple[str, ...] = (),
-                 saved_setup: SavedSetup | None = None):
-        self.adapters = {item.address or item.hci_name: item for item in adapters}
+                 saved_setup: SavedSetup | None = None,
+                 missing_adapters: int = 0):
         self.allow_code_read = allow_code_read
         self.export_dir = Path(export_dir).resolve() if export_dir else None
         self.known_credentials = dict(known_credentials or {})
         self.saved_setup = saved_setup or SavedSetup({}, {})
+        self.adapters: dict[str, AdapterIdentity] = {}
+        for item in adapters:
+            saved_ids = [
+                key for key, row in self.saved_setup.adapters.items()
+                if str(row["controller_address"]).upper() == item.address
+            ]
+            if len(saved_ids) > 1:
+                saved_ids = [key for key in saved_ids
+                             if self.saved_setup.adapters[key].get("usb_path") == item.usb_path]
+            adapter_id = saved_ids[0] if len(saved_ids) == 1 else slug(
+                f"usb_{item.usb_path or item.address or item.hci_name}"
+            )
+            if not saved_ids and adapter_id in self.saved_setup.adapters and item.address:
+                adapter_id = slug(f"usb_{item.address}")
+            if adapter_id in self.adapters or (not saved_ids and adapter_id in self.saved_setup.adapters):
+                raise ValueError(f"ambiguous USB adapter assignment for {adapter_id}")
+            self.adapters[adapter_id] = item
+        missing_saved = set(self.saved_setup.adapters).difference(self.adapters)
+        self.missing_adapters = max(missing_adapters, len(missing_saved))
         self.groups: dict[str, str] = {}
         for group_id, name in self.saved_setup.groups.items():
             self.groups[group_id] = name
@@ -291,10 +325,11 @@ class SetupSession:
         self.scan_duration_s: float | None = None
 
     async def scan_all(self, seconds: float = 12) -> None:
+        if not self.adapters:
+            raise ValueError("no powered USB Bluetooth adapters available for scanning")
         async with self.ble_lock:
             results = await asyncio.gather(*(scan(item, seconds) for item in self.adapters.values()))
-            for adapter, motors in zip(self.adapters.values(), results):
-                adapter_id = slug(f"usb_{adapter.usb_path or adapter.address or adapter.hci_name}")
+            for adapter_id, motors in zip(self.adapters, results):
                 for motor in motors:
                     key = opaque_id(motor.address)
                     if key in self.devices:
@@ -305,13 +340,10 @@ class SetupSession:
                         continue
                     default_id = slug(motor.name)
                     saved = self.saved_setup.devices.get(motor.address.upper())
-                    valid_adapters = {
-                        slug(f"usb_{item.usb_path or item.address or item.hci_name}")
-                        for item in self.adapters.values()
-                    }
                     preferred_adapter = (
                         saved.preferred_adapter
-                        if saved and saved.preferred_adapter in valid_adapters
+                        if saved and (saved.preferred_adapter in self.adapters or
+                                      saved.preferred_adapter in self.saved_setup.adapters)
                         else adapter_id
                     )
                     self.devices[key] = DeviceSetup(
@@ -373,12 +405,21 @@ class SetupSession:
         return {
             "adapters": [
                 {
-                    "id": slug(f"usb_{item.usb_path or item.address or item.hci_name}"),
+                    "id": adapter_id,
                     "usb_path": item.usb_path,
                     "product": item.usb_product,
                     "powered": item.powered,
                 }
-                for item in self.adapters.values()
+                for adapter_id, item in self.adapters.items()
+            ] + [
+                {
+                    "id": adapter_id,
+                    "usb_path": settings.get("usb_path"),
+                    "product": None,
+                    "powered": False,
+                }
+                for adapter_id, settings in self.saved_setup.adapters.items()
+                if adapter_id not in self.adapters
             ],
             "devices": [item.browser_dict(self.allow_code_read) for item in self.devices.values()],
             "groups": [{"id": group_id, "name": name}
@@ -387,7 +428,10 @@ class SetupSession:
             "busy": self.ble_lock.locked(),
             "scan": self.scan_state(),
             "allow_code_read": self.allow_code_read,
-            "can_export": self.export_dir is not None,
+            "can_export": bool(self.adapters) and self.export_dir is not None and not self.missing_adapters,
+            "missing_adapters": self.missing_adapters,
+            "can_exit_setup": bool(self.saved_setup.adapters),
+            "unscanned_saved_devices": len(self._unscanned_saved_devices()),
         }
 
     def configure(self, key: str, body: dict[str, Any]) -> None:
@@ -399,8 +443,9 @@ class SetupSession:
         device.id = generated_id
         device.dual_rail = bool(body.get("dual_rail", device.dual_rail))
         requested = str(body.get("preferred_adapter", device.preferred_adapter))
-        valid = {slug(f"usb_{x.usb_path or x.address or x.hci_name}") for x in self.adapters.values()}
-        if requested not in valid:
+        if requested not in self.adapters and not (
+            requested == device.preferred_adapter and requested in self.saved_setup.adapters
+        ):
             raise ValueError("unknown adapter assignment")
         device.preferred_adapter = requested
         requested_groups = body.get("groups")
@@ -447,20 +492,33 @@ class SetupSession:
             await inspect_motor(device.observation, adapter, self.allow_code_read)
 
     def adapter_for(self, adapter_id: str) -> AdapterIdentity:
-        for item in self.adapters.values():
-            if slug(f"usb_{item.usb_path or item.address or item.hci_name}") == adapter_id:
-                return item
-        raise KeyError(adapter_id)
+        try:
+            return self.adapters[adapter_id]
+        except KeyError as exc:
+            raise ValueError(f"Bluetooth adapter {adapter_id} is unavailable") from exc
+
+    def _unscanned_saved_devices(self) -> list[SavedDeviceSetup]:
+        scanned = {item.observation.address.upper() for item in self.devices.values()}
+        return [device for address, device in self.saved_setup.devices.items()
+                if address not in scanned]
 
     def export(self) -> tuple[Path, Path]:
         if self.export_dir is None:
             raise ValueError("setup saving was not enabled at launch")
+        if self.ble_lock.locked():
+            raise ValueError("wait for the active Bluetooth operation to finish")
+        if self.missing_adapters:
+            raise ValueError("Restore all configured Bluetooth adapters and reopen setup before saving.")
+        if not self.adapters:
+            raise ValueError("no powered USB Bluetooth adapters available for saving")
         selected = [item for item in self.devices.values() if item.enabled]
+        unchanged = self._unscanned_saved_devices()
         if not selected:
             raise ValueError("no devices have been discovered")
         if any(not item.access_code for item in selected):
             raise ValueError("selected shades need access codes before setup can be saved")
-        if len({item.id for item in selected}) != len(selected):
+        blind_ids = [item.id for item in [*selected, *unchanged]]
+        if len(set(blind_ids)) != len(blind_ids):
             raise ValueError("device ids must be unique")
         self.export_dir.mkdir(parents=True, exist_ok=True)
         config_path, secrets_path = self.export_dir / "config.toml", self.export_dir / "secrets.toml"
@@ -470,43 +528,47 @@ class SetupSession:
         if not base_config:
             lines = ["[controller]", "warm_connection_s = 30", "",
                      "[retry]", "attempts = 3", ""]
-        for adapter in self.adapters.values():
-            adapter_id = slug(f"usb_{adapter.usb_path or adapter.address or adapter.hci_name}")
+        for adapter_id, adapter in self.adapters.items():
             adapter_ids.append(adapter_id)
-            adapter_lines = [
-                "[[adapters]]", f'id = {json.dumps(adapter_id)}',
-                f'controller_address = {json.dumps(adapter.address)}',
-            ]
+            settings = {"max_connections": 5, "max_cold_connections": 1}
+            settings.update(self.saved_setup.adapters.get(adapter_id, {}))
+            settings.update(id=adapter_id, controller_address=adapter.address)
             if adapter.usb_path:
-                adapter_lines.append(f'usb_path = {json.dumps(adapter.usb_path)}')
-            adapter_lines.extend(["max_connections = 5", "max_cold_connections = 1", ""])
-            lines.extend(adapter_lines)
-        for item in selected:
-            fallbacks = [value for value in adapter_ids if value != item.preferred_adapter]
-            lines.extend([
-                "[[blinds]]", f'id = {json.dumps(item.id)}', f'name = {json.dumps(item.friendly_name)}',
-                f'dual_rail = {str(item.dual_rail).lower()}',
-                f'preferred_adapter = {json.dumps(item.preferred_adapter)}',
-                f'fallback_adapters = {json.dumps(fallbacks)}', "",
-            ])
+                settings["usb_path"] = adapter.usb_path
+            lines.extend(_serialize_toml_row("adapters", settings))
+        secret_rows: dict[str, dict[str, Any]] = {}
         groups: dict[str, list[str]] = {}
         for item in selected:
+            address = item.observation.address.upper()
+            saved = self.saved_setup.devices.get(address)
+            settings = dict(saved.config) if saved else {}
+            if not saved or saved.preferred_adapter != item.preferred_adapter:
+                settings["fallback_adapters"] = [
+                    value for value in adapter_ids if value != item.preferred_adapter
+                ]
+            settings.update(id=item.id, name=item.friendly_name, dual_rail=item.dual_rail,
+                            preferred_adapter=item.preferred_adapter)
+            lines.extend(_serialize_toml_row("blinds", settings))
+            credentials = dict(saved.secrets) if saved else {}
+            credentials.update(address=address, access_code=item.access_code)
+            secret_rows[item.id] = credentials
+        for item in unchanged:
+            lines.extend(_serialize_toml_row("blinds", item.config))
+            secret_rows[item.id] = item.secrets
+        for item in [*selected, *unchanged]:
             for group in item.groups:
                 groups.setdefault(group, []).append(item.id)
         for group, members in groups.items():
-            lines.extend([
-                "[[groups]]", f'id = {json.dumps(group)}',
-                f'name = {json.dumps(self.groups.get(group, group.replace("_", " ").title()))}',
-                f'members = {json.dumps(members)}', 'mode = "best_effort"', "",
-            ])
+            settings = {"mode": "best_effort", **self.saved_setup.group_configs.get(group, {})}
+            existing_order = settings.get("members", [])
+            ordered = [member for member in existing_order if member in members]
+            ordered.extend(member for member in members if member not in ordered)
+            settings.update(id=group, name=self.groups.get(group, group.replace("_", " ").title()),
+                            members=ordered)
+            lines.extend(_serialize_toml_row("groups", settings))
         if not base_config:
             lines.extend(["[mqtt]", "enabled = false", "", "[web]", "enabled = false", ""])
-        secret_lines = _serialize_toml_tables(deepcopy(self.saved_setup.secrets_base))
-        for item in selected:
-            secret_lines.extend([
-                f"[blinds.{item.id}]", f'address = {json.dumps(item.observation.address)}',
-                f'access_code = {json.dumps(item.access_code)}', "",
-            ])
+        secret_lines = _serialize_toml_tables({**self.saved_setup.secrets_base, "blinds": secret_rows})
         config_content = "\n".join(lines) + "\n"
         secrets_content = "\n".join(secret_lines)
         _write_text_no_follow(config_path, config_content, 0o600)
@@ -712,7 +774,8 @@ def main(argv: list[str] | None = None) -> None:
     if not token or len(token) < 16:
         raise SystemExit("set GRABER_SETUP_TOKEN to at least 16 characters")
     try:
-        adapters = select_usb_adapters(discover_adapters(), args.controller_address)
+        adapters = select_usb_adapters(discover_adapters(), args.controller_address,
+                                       allow_partial=True)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     networks = tuple(args.allowed_network or (["127.0.0.0/8", "::1/128"] if args.host in {"127.0.0.1", "::1"} else []))
@@ -727,11 +790,17 @@ def main(argv: list[str] | None = None) -> None:
         if args.existing_config else None
     )
     group_names = tuple(args.group_name or ())
-    web.run_app(create_app(SetupSession(adapters, allow_code_read=args.allow_code_read,
-                                        export_dir=args.export_dir,
-                                        known_credentials=known_credentials,
-                                        group_names=group_names,
-                                        saved_setup=saved_setup), settings),
+    requested = {address.upper() for address in (args.controller_address or ())}
+    missing = requested.difference(adapter.address for adapter in adapters)
+    try:
+        session = SetupSession(
+            adapters, allow_code_read=args.allow_code_read, export_dir=args.export_dir,
+            known_credentials=known_credentials, group_names=group_names,
+            saved_setup=saved_setup, missing_adapters=len(missing),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    web.run_app(create_app(session, settings),
                 host=args.host, port=args.port, access_log=None)
 
 

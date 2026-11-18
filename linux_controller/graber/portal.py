@@ -419,18 +419,44 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
     async def portal_status(_request: web.Request) -> web.Response:
         return web.json_response({"mode": supervisor.mode})
 
-    async def enter_setup(request: web.Request) -> web.Response:
-        if supervisor.active_commands:
-            raise web.HTTPConflict(text="wait for the active shade command to finish")
-        await supervisor.switch("setup")
-        return web.json_response({"mode": "setup"})
+    changing_mode = False
+
+    async def change_mode(mode: str) -> web.Response:
+        nonlocal changing_mode
+        if changing_mode or supervisor.active_commands:
+            raise web.HTTPConflict(text="wait for the active portal operation to finish")
+        changing_mode = True
+        try:
+            await supervisor.switch(mode)
+            return web.json_response({"mode": mode})
+        finally:
+            changing_mode = False
+
+    async def enter_setup(_request: web.Request) -> web.Response:
+        return await change_mode("setup")
+
+    async def exit_setup(_request: web.Request) -> web.Response:
+        if not (supervisor.config_path.is_file() and supervisor.secrets_path.is_file()):
+            raise web.HTTPConflict(text="save a controller configuration before leaving setup")
+        return await change_mode("control")
 
     async def proxy(request: web.Request) -> web.Response:
-        await supervisor.ensure_running()
-        command_request = is_command_request(request.method, request.path)
+        nonlocal changing_mode
+        if changing_mode:
+            raise web.HTTPConflict(text="wait for the portal to finish switching modes")
+        exporting = supervisor.mode == "setup" and request.method == "POST" and request.path == "/api/export"
+        if exporting and supervisor.active_commands:
+            raise web.HTTPConflict(text="wait for the active setup operation to finish")
+        setup_operation = request.method == "POST" and (
+            request.path == "/api/scan" or request.path.startswith("/api/devices/")
+        )
+        command_request = is_command_request(request.method, request.path) or setup_operation
+        if exporting:
+            changing_mode = True
         if command_request:
             supervisor.active_commands += 1
         try:
+            await supervisor.ensure_running()
             body = await request.read()
             headers = {key: value for key, value in request.headers.items()
                        if key.lower() not in HOP_BY_HOP | PRIVATE_PROXY_HEADERS}
@@ -443,8 +469,7 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
                 status = upstream.status
                 response_headers = {key: value for key, value in upstream.headers.items()
                                     if key.lower() not in HOP_BY_HOP | PRIVATE_RESPONSE_HEADERS}
-            if (supervisor.mode == "setup" and request.method == "POST" and
-                    request.path == "/api/export" and 200 <= status < 300):
+            if exporting and 200 <= status < 300:
                 await supervisor.switch("control")
                 try:
                     payload = json.loads(response_body)
@@ -459,6 +484,8 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
         finally:
             if command_request:
                 supervisor.active_commands -= 1
+            if exporting:
+                changing_mode = False
 
     app.router.add_get("/login", login_page)
     app.router.add_get("/assets/auth.js", auth_javascript)
@@ -470,6 +497,7 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
     app.router.add_post("/api/auth/account", configure_account)
     app.router.add_get("/api/portal/status", portal_status)
     app.router.add_post("/api/portal/setup", enter_setup)
+    app.router.add_post("/api/portal/control", exit_setup)
     app.router.add_route("*", "/{path:.*}", proxy)
     return app
 

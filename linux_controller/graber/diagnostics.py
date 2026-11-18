@@ -230,7 +230,9 @@ def discover_adapters(
     return adapters
 
 
-async def resolve_configured_adapters(configs: tuple[Any, ...]) -> list[Any]:
+async def resolve_configured_adapters(
+    configs: tuple[Any, ...], *, recover_power: Callable[[AdapterIdentity], bool] | None = None,
+) -> list[Any]:
     """Resolve configured stable selectors to transient BlueZ adapter names.
 
     Imports are local to keep this read-only diagnostics module usable on its
@@ -240,16 +242,29 @@ async def resolve_configured_adapters(configs: tuple[Any, ...]) -> list[Any]:
     from .adapter_manager import ResolvedAdapter
 
     discovered = await asyncio.to_thread(discover_adapters)
+    usb_adapters = [adapter for adapter in discovered if adapter.is_usb]
+    addresses = [config.controller_address.upper() for config in configs]
     resolved = []
     for config in configs:
         try:
             match = select_adapter(
-                discovered, address=config.controller_address, usb_path=config.usb_path
+                usb_adapters, address=config.controller_address, usb_path=config.usb_path
             )
         except LookupError:
-            continue
-        if not match.is_usb or match.powered is not True:
-            continue
+            if not config.usb_path or addresses.count(config.controller_address.upper()) != 1:
+                continue
+            try:
+                match = select_adapter(usb_adapters, address=config.controller_address)
+            except LookupError:
+                continue
+        if match.powered is not True:
+            # Only recover a uniquely identifiable, explicitly opted-in USB radio.
+            if (match.powered is not False or recover_power is None or not config.auto_recover_power
+                    or addresses.count(config.controller_address.upper()) != 1
+                    or sum(adapter.address == match.address for adapter in discovered) != 1):
+                continue
+            if not await asyncio.to_thread(recover_power, match):
+                continue
         resolved.append(ResolvedAdapter(config.id, match.address or "", match.hci_name, match.usb_path))
     return resolved
 
