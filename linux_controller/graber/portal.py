@@ -248,7 +248,7 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
         if route in public:
             return await handler(request)
         token = request.cookies.get(auth_manager.cookie_name)
-        session = auth_manager.sessions.get(token)
+        session = auth_manager.get_session(token)
         if session is None:
             return unauthorized(request)
         request["graber_session"] = session
@@ -352,7 +352,7 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
         return web.json_response(session_payload(request["graber_session"]))
 
     async def logout(request: web.Request) -> web.Response:
-        auth_manager.sessions.remove(request["graber_session_token"])
+        await asyncio.to_thread(auth_manager.sessions.remove, request["graber_session_token"])
         response = web.json_response({"authenticated": False})
         clear_session_cookie(response)
         return response
@@ -528,6 +528,7 @@ def main(argv: list[str] | None = None) -> None:
     auth_manager = AuthManager(
         PasswordStore(args.auth_file), secure_cookie=args.secure_cookie,
         session_ttl_s=args.session_ttl_s,
+        session_path=args.auth_file.with_name("sessions.json"),
     )
     web.run_app(create_app(
                     supervisor, allowed_networks=tuple(args.allowed_network),

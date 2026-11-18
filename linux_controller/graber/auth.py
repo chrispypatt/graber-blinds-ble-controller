@@ -1,4 +1,4 @@
-"""Password and in-memory session primitives for the local web portal."""
+"""Password and session primitives for the local web portal."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import getpass
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -17,7 +18,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -160,10 +161,10 @@ class PasswordStore:
         )
         return username_ok and hmac.compare_digest(actual, expected)
 
-    def _write(self, record: dict[str, object]) -> None:
-        _atomic_private_write(
-            self.path, json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-        )
+    def _write(self, record: dict[str, object]) -> str:
+        serialized = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        _atomic_private_write(self.path, serialized)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     def initialize(self, username: str, initial_password_file: str | Path) -> bool:
         """Ensure v2 recovery auth, migrating v1 without storing plaintext."""
@@ -262,22 +263,22 @@ class PasswordStore:
     def verify(self, username: str, password: str) -> bool:
         return self.authenticate(username, password) is not None
 
-    def set_owner(self, username: str, password: str) -> None:
+    def set_owner(self, username: str, password: str) -> str:
         username = self._validate_username(username)
         credential = self._credential(username, password)
         with self._lock:
             record = self._record()
             record["owner"] = credential
-            self._write(record)
+            return self._write(record)
 
-    def change_owner_password(self, username: str, current_password: str, new_password: str) -> None:
+    def change_owner_password(self, username: str, current_password: str, new_password: str) -> str:
         with self._lock:
             record = self._record()
             owner = record["owner"]
             if owner is None or not self._verify_credential(owner, username, current_password):
                 raise AuthError("current password is incorrect")
             record["owner"] = self._credential(str(owner["username"]), new_password)
-            self._write(record)
+            return self._write(record)
 
     def set_recovery_password(self, password: str) -> None:
         with self._lock:
@@ -300,18 +301,55 @@ class Session:
     expires_at: float
     setup_required: bool = False
     credential_generation: int = 0
+    credential_revision: str | None = None
 
 
 class SessionStore:
-    """Bounded, memory-only opaque browser sessions."""
+    """Bounded opaque browser sessions with optional private disk storage."""
 
     def __init__(self, ttl_s: float = 12 * 60 * 60, maximum: int = 64,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        if ttl_s < 60 or maximum < 1:
+                 clock: Callable[[], float] | None = None, *,
+                 path: Path | None = None) -> None:
+        if not math.isfinite(ttl_s) or ttl_s < 60 or maximum < 1:
             raise ValueError("session limits are invalid")
-        self.ttl_s, self.maximum, self._clock = float(ttl_s), int(maximum), clock
+        self.ttl_s, self.maximum = float(ttl_s), int(maximum)
+        self._clock = clock or (time.time if path is not None else time.monotonic)
+        self._path = path
         self._sessions: OrderedDict[str, Session] = OrderedDict()
         self._lock = threading.RLock()
+        if path is not None and (path.exists() or path.is_symlink()):
+            _validate_private_file(path)
+            metadata = path.stat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise AuthError("session file must be a regular file owned by the portal user")
+            self._load(path)
+
+    def _load(self, path: Path) -> None:
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            if stored["version"] != 1:
+                return
+            now = self._clock()
+            for key, raw in stored["sessions"].items():
+                session = replace(Session(**raw), credential_generation=0)
+                if (re.fullmatch(r"[a-f0-9]{64}", key)
+                        and isinstance(session.username, str)
+                        and session.role in ("owner", "recovery")
+                        and isinstance(session.csrf_token, str)
+                        and isinstance(session.setup_required, bool)
+                        and isinstance(session.credential_revision, str)
+                        and math.isfinite(session.expires_at)
+                        and now < session.expires_at <= now + self.ttl_s):
+                    self._sessions[key] = session
+        except (TypeError, ValueError, KeyError, AttributeError):
+            self._sessions.clear()
+        self._prune()
+
+    def _save(self) -> None:
+        if self._path is not None:
+            sessions = {key: asdict(value) for key, value in self._sessions.items()}
+            _atomic_private_write(self._path, json.dumps({"version": 1, "sessions": sessions}))
+
 
     @staticmethod
     def _key(token: str) -> str:
@@ -327,16 +365,18 @@ class SessionStore:
 
     def create(self, username: str, *, role: str = "owner",
                setup_required: bool = False,
-               credential_generation: int = 0) -> tuple[str, Session]:
+               credential_generation: int = 0,
+               credential_revision: str | None = None) -> tuple[str, Session]:
         with self._lock:
             self._prune()
             token = secrets.token_urlsafe(32)
             session = Session(
                 username, role, secrets.token_urlsafe(24), self._clock() + self.ttl_s,
-                setup_required, credential_generation,
+                setup_required, credential_generation, credential_revision,
             )
             self._sessions[self._key(token)] = session
             self._prune()
+            self._save()
             return token, session
 
     def get(self, token: str | None) -> Session | None:
@@ -353,11 +393,13 @@ class SessionStore:
     def remove(self, token: str | None) -> None:
         if token:
             with self._lock:
-                self._sessions.pop(self._key(token), None)
+                if self._sessions.pop(self._key(token), None) is not None:
+                    self._save()
 
     def clear(self) -> None:
         with self._lock:
             self._sessions.clear()
+            self._save()
 
 
 class LoginLimiter:
@@ -404,12 +446,14 @@ class AuthManager:
 
     def __init__(self, password_store: PasswordStore, *, secure_cookie: bool = True,
                  session_ttl_s: float = 12 * 60 * 60,
-                 limiter: LoginLimiter | None = None) -> None:
+                 limiter: LoginLimiter | None = None,
+                 session_path: Path | None = None) -> None:
         if not password_store.configured:
             raise AuthError(f"authentication is not initialized: {password_store.path}")
         self.password_store = password_store
         self.secure_cookie = secure_cookie
-        self.sessions = SessionStore(session_ttl_s)
+        self.sessions = SessionStore(session_ttl_s, path=session_path)
+        self._persistent_sessions = session_path is not None
         self.limiter = limiter or LoginLimiter()
         self._credential_lock = threading.RLock()
         self._credential_generation = 0
@@ -418,24 +462,43 @@ class AuthManager:
     def session_ttl_s(self) -> float:
         return self.sessions.ttl_s
 
+    def _credential_revision(self) -> str | None:
+        if not self._persistent_sessions:
+            return None
+        return hashlib.sha256(self.password_store.path.read_bytes()).hexdigest()
+
+    def get_session(self, token: str | None) -> Session | None:
+        with self._credential_lock:
+            session = self.sessions.get(token)
+            if session is not None:
+                try:
+                    if session.credential_revision == self._credential_revision():
+                        return session
+                except OSError:
+                    return None
+            return None
+
     def login(self, client: str, username: str, password: str) -> tuple[str, Session] | None:
         if self.limiter.retry_after(client):
             return None
         with self._credential_lock:
             generation = self._credential_generation
+            revision = self._credential_revision()
         authenticated = self.password_store.authenticate(username, password)
         if authenticated is None:
             self.limiter.failed(client)
             return None
         role, canonical_username = authenticated
         with self._credential_lock:
-            if generation != self._credential_generation:
+            setup_required = self.password_store.setup_required
+            if generation != self._credential_generation or revision != self._credential_revision():
                 return None
             self.limiter.succeeded(client)
             return self.sessions.create(
                 canonical_username, role=role,
-                setup_required=self.password_store.setup_required,
+                setup_required=setup_required,
                 credential_generation=self._credential_generation,
+                credential_revision=revision,
             )
 
     def change_password(self, session: Session, current_password: str | None,
@@ -443,9 +506,10 @@ class AuthManager:
         if session.role != "owner":
             raise AuthError("recovery password can be changed only from the command line")
         with self._credential_lock:
-            if session.credential_generation != self._credential_generation:
+            if (session.credential_generation != self._credential_generation
+                    or session.credential_revision != self._credential_revision()):
                 raise AuthError("credentials changed; sign in again")
-            self.password_store.change_owner_password(
+            revision = self.password_store.change_owner_password(
                 session.username, current_password or "", new_password
             )
             self._credential_generation += 1
@@ -453,6 +517,7 @@ class AuthManager:
             return self.sessions.create(
                 session.username, role="owner",
                 credential_generation=self._credential_generation,
+                credential_revision=revision if self._persistent_sessions else None,
             )
 
     def configure_owner(self, session: Session, username: str,
@@ -460,14 +525,16 @@ class AuthManager:
         if session.role != "recovery":
             raise AuthError("only the recovery administrator can replace the owner account")
         with self._credential_lock:
-            if session.credential_generation != self._credential_generation:
+            if (session.credential_generation != self._credential_generation
+                    or session.credential_revision != self._credential_revision()):
                 raise AuthError("credentials changed; sign in again")
-            self.password_store.set_owner(username, password)
+            revision = self.password_store.set_owner(username, password)
             self._credential_generation += 1
             self.sessions.clear()
             return self.sessions.create(
                 self.password_store.owner_username or username, role="owner",
                 credential_generation=self._credential_generation,
+                credential_revision=revision if self._persistent_sessions else None,
             )
 
 

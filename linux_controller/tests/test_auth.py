@@ -239,3 +239,42 @@ def test_cli_init_recovery_rotation_and_owner_reset(tmp_path, monkeypatch, capsy
     assert main(["reset-owner", "--file", str(auth_file)]) == 0
     assert store.setup_required
     assert RECOVERY_PASSWORD not in capsys.readouterr().out
+
+
+def test_persisted_owner_session_survives_restart_and_logout_revokes_it(tmp_path):
+    store, _ = initialized_store(tmp_path)
+    path = tmp_path / "sessions.json"
+    token, session = AuthManager(store, session_path=path).login("client", "owner", OWNER_PASSWORD)
+    restarted = AuthManager(store, session_path=path)
+    assert restarted.get_session(token) == session
+    assert token not in path.read_text()
+    assert path.stat().st_mode & 0o777 == 0o600
+    restarted.sessions.remove(token)
+    assert AuthManager(store, session_path=path).get_session(token) is None
+
+
+def test_persistent_sessions_reject_external_password_changes_and_keep_new_login(tmp_path):
+    store, _ = initialized_store(tmp_path)
+    path = tmp_path / "sessions.json"
+    manager = AuthManager(store, session_path=path)
+    old, _ = manager.login("client", "owner", OWNER_PASSWORD)
+    store.set_owner("owner", "new strong password")
+    assert manager.get_session(old) is None
+    restarted = AuthManager(store, session_path=path)
+    assert restarted.get_session(old) is None
+    token, session = restarted.login("client", "owner", "new strong password")
+    replacement, _ = restarted.change_password(session, "new strong password", OWNER_PASSWORD)
+    again = AuthManager(store, session_path=path)
+    assert again.get_session(token) is None
+    assert again.get_session(replacement) is not None
+
+
+def test_persisted_sessions_keep_original_expiry(tmp_path):
+    now = [100.0]
+    path = tmp_path / "sessions.json"
+    sessions = SessionStore(ttl_s=60, clock=lambda: now[0], path=path)
+    token, _ = sessions.create("owner", credential_revision="test")
+    now[0] = 140
+    assert SessionStore(ttl_s=60, clock=lambda: now[0], path=path).get(token).expires_at == 160
+    now[0] = 161
+    assert SessionStore(ttl_s=60, clock=lambda: now[0], path=path).get(token) is None
