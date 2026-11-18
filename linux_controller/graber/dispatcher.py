@@ -25,12 +25,21 @@ class _Queued:
     queued_at: float
     queue_depth_at_enqueue: int
     started_at: float | None = None
-    conflict_stop: bool = False
+    internal_stop: bool = False
+    awaiting_group_release: bool = False
     interrupted_by: str | None = None
 
     @property
     def is_stop(self) -> bool:
-        return self.command.kind is CommandKind.STOP or self.conflict_stop
+        return self.command.kind is CommandKind.STOP
+
+
+@dataclass(frozen=True)
+class GroupMemberAdmission:
+    generation: int
+    result: asyncio.Future[CommandResult] | None = None
+    stop: asyncio.Future[CommandResult] | None = None
+    deferred: bool = False
 
 
 class BlindDispatcher:
@@ -45,7 +54,8 @@ class BlindDispatcher:
         self._generation = 0
         self._active_item: _Queued | None = None
         self._active_task: asyncio.Task[CommandResult] | None = None
-        self._conflict_stop_id: str | None = None
+        self._pending_after_stop: _Queued | None = None
+        self._stop_in_progress: asyncio.Future[CommandResult] | None = None
         self._lifecycle_listener: Callable[[str, str, str], None] | None = None
         self._telemetry = telemetry or (lambda _event, _fields: None)
 
@@ -65,12 +75,39 @@ class BlindDispatcher:
             future = self._submit_locked(command)
         return await asyncio.shield(future)
 
-    async def submit_if_busy(self, command: BlindCommand) -> asyncio.Future[CommandResult] | None:
-        """Admit interrupts and duplicates before synchronized group preparation."""
+    async def admit_group_member(self, command: BlindCommand) -> GroupMemberAdmission:
+        """Handle busy members immediately and capture the idle member's generation."""
         async with self._state_lock:
-            if self._interruptible_item() or self._conflict_stop_id or command.id in self._results:
-                return self._submit_locked(command)
-        return None
+            if command.id in self._results:
+                return GroupMemberAdmission(self._generation, self._submit_locked(command))
+            if self._interruptible_item() or self._stop_in_progress or self._pending_after_stop:
+                future = self._submit_locked(command, defer_until_group_release=True)
+                pending = self._pending_after_stop
+                deferred = pending is not None and pending.future is future
+                return GroupMemberAdmission(
+                    self._generation, future, self._stop_in_progress if deferred else None, deferred,
+                )
+            return GroupMemberAdmission(self._generation)
+
+    async def resolve_group_member(self, command_id: str, *, release: bool) -> None:
+        async with self._state_lock:
+            pending = self._pending_after_stop
+            if pending is None or pending.command.id != command_id or not pending.awaiting_group_release:
+                return
+            if release:
+                pending.awaiting_group_release = False
+                self._release_pending_locked()
+            else:
+                self._pending_after_stop = None
+                self._store_result_locked(pending, CommandResult(
+                    command_id, self.blind.config.id, Outcome.FAILED,
+                    received_at=pending.command.received_at, error="group preparation aborted",
+                ))
+
+    async def submit_prepared(self, command: BlindCommand, generation: int) -> CommandResult:
+        async with self._state_lock:
+            future = self._submit_locked(command, generation)
+        return await asyncio.shield(future)
 
     def _interruptible_item(self) -> _Queued | None:
         if (self._active_item is not None and not self._active_item.is_stop
@@ -78,7 +115,14 @@ class BlindDispatcher:
             return self._active_item
         return None
 
-    def _submit_locked(self, command: BlindCommand) -> asyncio.Future[CommandResult]:
+    @staticmethod
+    def _same_target(first: BlindCommand, second: BlindCommand) -> bool:
+        return (first.kind, first.rail, first.position) == (second.kind, second.rail, second.position)
+
+    def _submit_locked(
+        self, command: BlindCommand, generation: int | None = None,
+        *, defer_until_group_release: bool = False,
+    ) -> asyncio.Future[CommandResult]:
         previous = self._results.get(command.id)
         if previous is not None:
             completed = isinstance(previous, CommandResult)
@@ -97,16 +141,36 @@ class BlindDispatcher:
             self.start()
         future = asyncio.get_running_loop().create_future()
         self._results[command.id] = future
+        if generation is not None and generation != self._generation:
+            item = _Queued(command, future, generation, time.monotonic(), self._queue.qsize())
+            self._store_result_locked(item, self._superseded_result(item, "newer-stop"))
+            return future
         is_stop = command.kind is CommandKind.STOP
-        if self._conflict_stop_id is not None and not is_stop:
-            discarded = _Queued(command, future, self._generation,
+        active_item = self._interruptible_item()
+        pending = self._pending_after_stop
+        current = pending or active_item
+        if not is_stop and current is not None and self._same_target(current.command, command):
+            duplicate = _Queued(command, future, self._generation,
                                 time.monotonic(), self._queue.qsize())
-            self._store_result_locked(
-                discarded, self._superseded_result(discarded, self._conflict_stop_id),
-            )
+            self._store_result_locked(duplicate, CommandResult(
+                command.id, self.blind.config.id, Outcome.DUPLICATE,
+                received_at=command.received_at,
+            ))
             return future
 
-        active_item = self._interruptible_item()
+        if pending is not None or self._stop_in_progress is not None:
+            if pending is not None:
+                self._store_result_locked(pending, self._superseded_result(pending, command.id))
+            if not is_stop:
+                item = _Queued(command, future, self._generation, time.monotonic(), 0,
+                               awaiting_group_release=defer_until_group_release)
+                self._pending_after_stop = item
+                self._record_queued(item)
+                self._release_pending_locked()
+                return future
+            self._pending_after_stop = None
+            self._stop_in_progress = None
+
         conflict_stop = active_item is not None and not is_stop
         if is_stop or conflict_stop:
             self._generation += 1
@@ -114,9 +178,28 @@ class BlindDispatcher:
             if active_item is not None and self._active_task is not None:
                 active_item.interrupted_by = command.id
                 self._active_task.cancel()
-        depth = self._queue.qsize()
-        item = _Queued(command, future, self._generation, time.monotonic(), depth,
-                       conflict_stop=conflict_stop)
+        item = _Queued(command, future, self._generation, time.monotonic(), self._queue.qsize())
+        if conflict_stop and active_item is not None:
+            item.awaiting_group_release = defer_until_group_release
+            self._pending_after_stop = item
+            stop_command = replace(command, id=f"{command.id}:stop", kind=CommandKind.STOP,
+                                   rail=None, position=None, internal=True)
+            stop_future = asyncio.get_running_loop().create_future()
+            self._stop_in_progress = stop_future
+            self._queue.put_nowait(_Queued(
+                stop_command, stop_future, self._generation,
+                item.queued_at, 0, internal_stop=True,
+            ))
+            self._telemetry("dispatcher_command_conflict", {
+                "blind_id": self.blind.config.id,
+                "command_id": command.id,
+                "interrupted_command_id": active_item.command.id,
+                "stop_command_id": stop_command.id,
+                "kind": command.kind.value,
+            })
+            self._record_queued(item)
+            return future
+
         try:
             self._queue.put_nowait(item)
         except asyncio.QueueFull:
@@ -129,22 +212,23 @@ class BlindDispatcher:
             })
             raise QueueFull(f"queue full for {self.blind.config.id}")
 
-        if conflict_stop and active_item is not None:
-            self._conflict_stop_id = command.id
-            self._telemetry("dispatcher_command_conflict", {
-                "blind_id": self.blind.config.id,
-                "command_id": command.id,
-                "interrupted_command_id": active_item.command.id,
-                "kind": command.kind.value,
-            })
+        self._record_queued(item)
+        return future
+
+    def _release_pending_locked(self) -> None:
+        pending = self._pending_after_stop
+        if pending is not None and self._stop_in_progress is None and not pending.awaiting_group_release:
+            self._pending_after_stop = None
+            self._queue.put_nowait(pending)
+
+    def _record_queued(self, item: _Queued) -> None:
         self._telemetry("dispatcher_command_queued", {
             "blind_id": self.blind.config.id,
-            "command_id": command.id,
-            "kind": command.kind.value,
-            "queue_depth": depth + 1,
+            "command_id": item.command.id,
+            "kind": item.command.kind.value,
+            "queue_depth": item.queue_depth_at_enqueue + 1,
         })
-        self._notify_lifecycle("queued", command.id)
-        return future
+        self._notify_lifecycle("queued", item.command.id)
 
     def _superseded_result(self, item: _Queued, stop_id: str) -> CommandResult:
         return CommandResult(
@@ -154,8 +238,6 @@ class BlindDispatcher:
         )
 
     def _store_result_locked(self, item: _Queued, result: CommandResult) -> None:
-        if item.conflict_stop and self._conflict_stop_id == item.command.id:
-            self._conflict_stop_id = None
         now = time.monotonic()
         queue_wait_ms = (
             ((item.started_at or now) - item.queued_at) * 1000
@@ -176,6 +258,10 @@ class BlindDispatcher:
                 result.error and result.error.startswith("superseded by stop command")
             ),
         })
+        if item.internal_stop:
+            if not item.future.done():
+                item.future.set_result(result)
+            return
         self._results[item.command.id] = result
         self._results.move_to_end(item.command.id)
         if len(self._results) > self._dedupe_size:
@@ -219,13 +305,10 @@ class BlindDispatcher:
                             ),
                             "queue_depth_at_enqueue": item.queue_depth_at_enqueue,
                         })
-                        self._notify_lifecycle("running", item.command.id)
-                        command = item.command
-                        if item.conflict_stop:
-                            command = replace(command, kind=CommandKind.STOP,
-                                              rail=None, position=None)
+                        if not item.internal_stop:
+                            self._notify_lifecycle("running", item.command.id)
                         self._active_task = asyncio.create_task(
-                            self.blind.execute(command),
+                            self.blind.execute(item.command),
                             name=f"blind-execute-{self.blind.config.id}",
                         )
                 if result is None:
@@ -251,10 +334,19 @@ class BlindDispatcher:
                     if self._active_item is item:
                         self._active_item = None
                         self._active_task = None
-                    if item.conflict_stop and result.outcome is Outcome.COMPLETED:
-                        discarded = self._superseded_result(item, item.command.id)
-                        result = replace(result, outcome=discarded.outcome, error=discarded.error)
                     self._store_result_locked(item, result)
+                    if item.internal_stop:
+                        if self._stop_in_progress is item.future:
+                            self._stop_in_progress = None
+                        if result.outcome is Outcome.COMPLETED:
+                            self._release_pending_locked()
+                        elif self._pending_after_stop is not None:
+                            pending, self._pending_after_stop = self._pending_after_stop, None
+                            self._store_result_locked(pending, replace(
+                                result, command_id=pending.command.id,
+                                received_at=pending.command.received_at,
+                                error=f"STOP was not confirmed: {result.error or result.outcome.value}",
+                            ))
                 self._queue.task_done()
 
     async def close(self) -> None:
@@ -272,6 +364,14 @@ class BlindDispatcher:
                 ))
             self._active_item = None
             self._active_task = None
+            self._stop_in_progress = None
+            if self._pending_after_stop is not None:
+                pending, self._pending_after_stop = self._pending_after_stop, None
+                self._store_result_locked(pending, CommandResult(
+                    pending.command.id, self.blind.config.id, Outcome.FAILED,
+                    received_at=pending.command.received_at,
+                    error="controller shutdown before execution",
+                ))
             while not self._queue.empty():
                 item = self._queue.get_nowait()
                 if item is not None:

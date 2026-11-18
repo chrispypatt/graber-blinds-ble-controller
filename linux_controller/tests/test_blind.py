@@ -9,9 +9,11 @@ from graber.ble_transport import DiscoveredDevice
 from graber.blind import BlindCommand, BlindController, Outcome
 from graber.config import AdapterConfig, BlindConfig, RetryConfig
 from graber.dispatcher import BlindDispatcher
+from graber.group_controller import Controller
+from graber.main import publish_command_lifecycle
 from graber.protocol import (
     AUTH_CHARACTERISTIC, BATTERY_CHARACTERISTIC, BOTTOM_POSITION_CHARACTERISTIC, BOTTOM_TARGET_CHARACTERISTIC,
-    EXECUTE_CHARACTERISTIC, TOP_POSITION_CHARACTERISTIC, CommandKind, Rail,
+    EXECUTE_CHARACTERISTIC, TOP_POSITION_CHARACTERISTIC, TOP_TARGET_CHARACTERISTIC, CommandKind, Rail,
 )
 
 
@@ -122,25 +124,31 @@ def test_dispatcher_conflict_cancels_target_write_and_sends_dual_rail_stop(stop_
                 except asyncio.CancelledError:
                     self.target_cancelled = True
                     raise
+            elif characteristic == TOP_TARGET_CHARACTERISTIC:
+                self.notifications[TOP_POSITION_CHARACTERISTIC](value)
 
     async def scenario():
         connection = BlockingTargetConnection()
-        blind = make_controller(connection, dual=True, feedback_timeout=0.5)
+        blind = make_controller(
+            connection, dual=True, feedback_timeout=0.5,
+            telemetry=lambda event, fields: publish_command_lifecycle(controller, event, fields),
+        )
         dispatcher = BlindDispatcher(blind)
+        controller = Controller({"blind": dispatcher}, ())
         try:
-            movement = asyncio.create_task(dispatcher.submit(
-                BlindCommand("first", CommandKind.SET_POSITION, Rail.BOTTOM, 42)
+            movement = asyncio.create_task(controller.submit_command(
+                "blind", "set_bottom_position", 42, command_id="first",
             ))
             await asyncio.wait_for(connection.target_started.wait(), 1)
             blind._last_change = time.monotonic() - 3
-            conflict = await asyncio.wait_for(dispatcher.submit(
-                BlindCommand("second", CommandKind.SET_POSITION, Rail.TOP, 90)
+            conflict = await asyncio.wait_for(controller.submit_command(
+                "blind", "set_top_position", 10, command_id="second",
             ), 2)
             original = await asyncio.wait_for(movement, 1)
             assert original.outcome is Outcome.FAILED
             assert original.error == "superseded by stop command second"
             assert connection.target_cancelled
-            assert connection.writes == [
+            assert connection.writes[:4] == [
                 (AUTH_CHARACTERISTIC, b"0123456"),
                 (BOTTOM_TARGET_CHARACTERISTIC, b"\x2a"),
                 (AUTH_CHARACTERISTIC, b"\x10"),
@@ -149,6 +157,8 @@ def test_dispatcher_conflict_cancels_target_write_and_sends_dual_rail_stop(stop_
 
             if stop_write_fails:
                 assert conflict.outcome is Outcome.COMPLETION_UNCONFIRMED
+                assert conflict.error.startswith("STOP was not confirmed")
+                assert len(connection.writes) == 4
                 assert not connection.connected
                 runtime, = await blind._adapters.candidates(blind.config)
                 for _ in range(2):
@@ -156,9 +166,13 @@ def test_dispatcher_conflict_cancels_target_write_and_sends_dual_rail_stop(stop_
                 for _ in range(2):
                     runtime.connection_slots.release()
             else:
-                assert conflict.outcome is Outcome.FAILED
-                assert conflict.error == "superseded by stop command second"
+                assert conflict.outcome is Outcome.COMPLETED
+                assert connection.writes[4:] == [
+                    (TOP_TARGET_CHARACTERISTIC, b"\x5a"),
+                    (EXECUTE_CHARACTERISTIC, b"\x14"),
+                ]
                 assert connection.connected
+            assert controller.diagnostics_for("blind")["active_command_id"] is None
         finally:
             await dispatcher.close()
 

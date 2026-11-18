@@ -23,7 +23,10 @@ class GroupResult:
 
     @property
     def successful(self) -> bool:
-        return bool(self.results) and all(x.outcome is Outcome.COMPLETED for x in self.results.values())
+        return bool(self.results) and not self.preparation_errors and all(
+            item.outcome in {Outcome.COMPLETED, Outcome.DUPLICATE}
+            for item in self.results.values()
+        )
 
 
 def parse_action(action: str, position: int | None = None) -> tuple[CommandKind, Rail | None, int | None]:
@@ -184,6 +187,7 @@ class Controller:
         preparation_errors: dict[str, str] = {}
         ready = list(members)
         early: dict[str, asyncio.Future[CommandResult]] = {}
+        prepared_generations: dict[str, int] = {}
 
         def member_command(blind_id: str) -> BlindCommand:
             return BlindCommand(f"{command_id}:{blind_id}", kind, rail, position, time.time())
@@ -191,41 +195,72 @@ class Controller:
         # STOP is an interrupt, not a synchronized movement. Preparing every
         # member first would delay it behind the operations it must supersede.
         if group.mode == "synchronized" and kind is not CommandKind.STOP:
-            prepare_started = time.monotonic()
-            for blind_id in members:
-                future = await self.dispatchers[blind_id].submit_if_busy(member_command(blind_id))
-                if future is not None:
-                    early[blind_id] = future
-                    self._telemetry("group_member_dispatched", {
-                        "command_id": command_id, "group_id": group.id, "blind_id": blind_id,
-                        "dispatch_offset_ms": (time.monotonic() - started) * 1000,
-                        "before_preparation": True,
-                    })
-            waiting = [item for item in members if item not in early]
-
-            async def prepare(blind_id: str) -> None:
-                try:
-                    await self.dispatchers[blind_id].blind.prepare()
-                except Exception as exc:
-                    preparation_errors[blind_id] = f"{type(exc).__name__}: {exc}"
+            deferred_members: list[str] = []
+            member_stops: dict[str, asyncio.Future[CommandResult]] = {}
+            release_deferred = False
             try:
-                async with asyncio.timeout(group.prepare_timeout_s):
-                    await asyncio.gather(*(prepare(item) for item in waiting))
-            except TimeoutError:
-                for item in waiting:
-                    session = self.dispatchers[item].blind._session
-                    if (not session or not session.connection.connected) and item not in preparation_errors:
-                        preparation_errors[item] = "preparation deadline exceeded"
-            ready = [item for item in waiting if item not in preparation_errors]
-            self._telemetry("group_preparation_completed", {
-                "command_id": command_id, "group_id": group.id, "mode": group.mode,
-                "prepare_ms": (time.monotonic() - prepare_started) * 1000,
-                "ready_count": len(ready),
-                "preparation_failure_count": len(preparation_errors),
-                "failed_members": sorted(preparation_errors),
-            })
-            if preparation_errors and group.partial_failure == "abort":
-                ready = []
+                prepare_started = time.monotonic()
+                for blind_id in members:
+                    admission = await self.dispatchers[blind_id].admit_group_member(
+                        member_command(blind_id),
+                    )
+                    if admission.deferred:
+                        deferred_members.append(blind_id)
+                    if admission.stop is not None:
+                        member_stops[blind_id] = admission.stop
+                    if admission.result is not None:
+                        early[blind_id] = admission.result
+                        self._telemetry("group_member_dispatched", {
+                            "command_id": command_id, "group_id": group.id, "blind_id": blind_id,
+                            "dispatch_offset_ms": (time.monotonic() - started) * 1000,
+                            "before_preparation": True,
+                        })
+                    else:
+                        prepared_generations[blind_id] = admission.generation
+                waiting = [item for item in members if item not in early]
+
+                async def prepare(blind_id: str) -> None:
+                    try:
+                        await self.dispatchers[blind_id].blind.prepare()
+                    except Exception as exc:
+                        preparation_errors[blind_id] = f"{type(exc).__name__}: {exc}"
+
+                async def confirm_stop(blind_id: str, future: asyncio.Future[CommandResult]) -> None:
+                    result = await asyncio.shield(future)
+                    if result.outcome is not Outcome.COMPLETED:
+                        preparation_errors[blind_id] = f"STOP was not confirmed: {result.error or result.outcome.value}"
+
+                try:
+                    async with asyncio.timeout(group.prepare_timeout_s):
+                        await asyncio.gather(
+                            *(prepare(item) for item in waiting),
+                            *(confirm_stop(item, future) for item, future in member_stops.items()),
+                        )
+                except TimeoutError:
+                    for item in waiting:
+                        session = self.dispatchers[item].blind._session
+                        if (not session or not session.connection.connected) and item not in preparation_errors:
+                            preparation_errors[item] = "preparation deadline exceeded"
+                    for item, future in member_stops.items():
+                        if not future.done() or future.result().outcome is not Outcome.COMPLETED:
+                            preparation_errors.setdefault(item, "STOP confirmation deadline exceeded")
+                ready = [item for item in waiting if item not in preparation_errors]
+                self._telemetry("group_preparation_completed", {
+                    "command_id": command_id, "group_id": group.id, "mode": group.mode,
+                    "prepare_ms": (time.monotonic() - prepare_started) * 1000,
+                    "ready_count": len(ready),
+                    "preparation_failure_count": len(preparation_errors),
+                    "failed_members": sorted(preparation_errors),
+                })
+                release_deferred = not preparation_errors or group.partial_failure != "abort"
+                if not release_deferred:
+                    ready = []
+            finally:
+                for blind_id in deferred_members:
+                    await self.dispatchers[blind_id].resolve_group_member(
+                        f"{command_id}:{blind_id}",
+                        release=release_deferred and blind_id not in preparation_errors,
+                    )
         release_started = time.monotonic()
         dispatch_times: dict[str, float] = {}
         self._telemetry("group_commands_released", {
@@ -241,7 +276,13 @@ class Controller:
                 "command_id": command_id, "group_id": group.id, "blind_id": blind_id,
                 "dispatch_offset_ms": (dispatched_at - release_started) * 1000,
             })
-            return blind_id, await self.dispatchers[blind_id].submit(member_command(blind_id))
+            dispatcher = self.dispatchers[blind_id]
+            command = member_command(blind_id)
+            if blind_id in prepared_generations:
+                return blind_id, await dispatcher.submit_prepared(
+                    command, prepared_generations[blind_id],
+                )
+            return blind_id, await dispatcher.submit(command)
         released = [item for item in members if item in early or item in ready]
         gathered = await asyncio.gather(*(run(item) for item in released), return_exceptions=True)
         pairs = []

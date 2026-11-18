@@ -1,8 +1,10 @@
 import asyncio
 
+import pytest
+
 from graber.blind import CommandResult, Outcome
 from graber.config import GroupConfig
-from graber.dispatcher import BlindDispatcher
+from graber.dispatcher import BlindDispatcher, GroupMemberAdmission
 from graber.group_controller import Controller, GroupResult, parse_action
 from graber.protocol import CommandKind, Rail
 
@@ -45,8 +47,11 @@ class FakeDispatcher:
         self.commands.append(command)
         return CommandResult(command.id, self.blind.config.id, self.outcome)
 
-    async def submit_if_busy(self, command):
-        return None
+    async def admit_group_member(self, command):
+        return GroupMemberAdmission(0)
+
+    async def submit_prepared(self, command, generation):
+        return await self.submit(command)
 
     async def close(self):
         pass
@@ -302,7 +307,8 @@ def test_synchronized_group_stop_skips_readiness_preparation():
     asyncio.run(scenario())
 
 
-def test_synchronized_group_interrupts_busy_member_before_preparing_other_members():
+@pytest.mark.parametrize("failure", [None, "prepare", "stop", "cancel"])
+def test_synchronized_group_stops_busy_member_then_honors_readiness(failure):
     class MovingBlind(FakeBlind):
         def __init__(self):
             super().__init__("moving")
@@ -314,7 +320,11 @@ def test_synchronized_group_interrupts_busy_member_before_preparing_other_member
             self.commands.append(command)
             if command.kind is CommandKind.STOP:
                 self.stop_started.set()
-            else:
+                if failure == "stop":
+                    return CommandResult(
+                        command.id, self.config.id, Outcome.COMPLETION_UNCONFIRMED,
+                    )
+            elif command.id == "remote":
                 self.move_started.set()
                 await asyncio.Event().wait()
             return CommandResult(command.id, self.config.id, Outcome.COMPLETED)
@@ -332,9 +342,11 @@ def test_synchronized_group_interrupts_busy_member_before_preparing_other_member
         async def prepare_idle():
             preparing.set()
             await release.wait()
+            if failure == "prepare":
+                raise RuntimeError("idle adapter unavailable")
 
         idle.blind.prepare = prepare_idle
-        group = GroupConfig("group", "Group", ("moving", "idle"), "synchronized", 2)
+        group = GroupConfig("group", "Group", ("moving", "idle"), "synchronized", 2, "abort")
         controller = Controller({"moving": moving, "idle": idle}, (group,))
         remote = asyncio.create_task(controller.submit_command(
             "moving", "open", command_id="remote",
@@ -349,19 +361,76 @@ def test_synchronized_group_interrupts_busy_member_before_preparing_other_member
             assert (await remote).outcome is Outcome.FAILED
             assert moving_blind.prepare_calls == 0
             assert idle.commands == []
+            assert len(moving_blind.commands) == 2
             assert not grouped.done()
+
+            if failure == "cancel":
+                grouped.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await grouped
+                assert len(moving_blind.commands) == 2
+                direct = await asyncio.wait_for(controller.submit_command("moving", "close"), 1)
+                assert direct.outcome is Outcome.COMPLETED
+                assert [item.kind for item in moving_blind.commands] == [
+                    CommandKind.FULL_OPEN, CommandKind.STOP, CommandKind.FULL_CLOSE,
+                ]
+                return
 
             release.set()
             result = await asyncio.wait_for(grouped, 1)
-            assert result.results["moving"].outcome is Outcome.FAILED
-            assert result.results["idle"].outcome is Outcome.COMPLETED
-            assert [item.kind for item in moving_blind.commands] == [
-                CommandKind.FULL_OPEN, CommandKind.STOP,
-            ]
-            assert [item.kind for item in idle.commands] == [CommandKind.FULL_CLOSE]
+            if failure:
+                assert not result.successful
+                assert len(moving_blind.commands) == 2
+                assert idle.commands == []
+            else:
+                assert result.successful
+                assert [item.kind for item in moving_blind.commands] == [
+                    CommandKind.FULL_OPEN, CommandKind.STOP, CommandKind.FULL_CLOSE,
+                ]
+                assert [item.kind for item in idle.commands] == [CommandKind.FULL_CLOSE]
         finally:
             release.set()
             await moving.close()
+
+    asyncio.run(scenario())
+
+
+def test_explicit_stop_invalidates_movement_during_synchronized_preparation():
+    class PreparingBlind(FakeBlind):
+        def __init__(self):
+            super().__init__("preparing")
+            self.preparing = asyncio.Event()
+            self.release = asyncio.Event()
+            self.commands = []
+
+        async def prepare(self):
+            self.preparing.set()
+            await self.release.wait()
+
+        async def execute(self, command):
+            self.commands.append(command)
+            return CommandResult(command.id, self.config.id, Outcome.COMPLETED)
+
+        async def close(self):
+            pass
+
+    async def scenario():
+        blind = PreparingBlind()
+        dispatcher = BlindDispatcher(blind)
+        group = GroupConfig("group", "Group", ("preparing",), "synchronized", 2)
+        controller = Controller({"preparing": dispatcher}, (group,))
+        grouped = asyncio.create_task(controller.submit_command("group", "open"))
+        try:
+            await asyncio.wait_for(blind.preparing.wait(), 1)
+            stopped = await asyncio.wait_for(controller.submit_command("preparing", "stop"), 1)
+            assert stopped.outcome is Outcome.COMPLETED
+            blind.release.set()
+            result = await asyncio.wait_for(grouped, 1)
+            assert result.results["preparing"].outcome is Outcome.FAILED
+            assert [item.kind for item in blind.commands] == [CommandKind.STOP]
+        finally:
+            blind.release.set()
+            await dispatcher.close()
 
     asyncio.run(scenario())
 

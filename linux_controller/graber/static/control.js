@@ -4,8 +4,7 @@ const $=selector=>document.querySelector(selector);
 const $$=selector=>[...document.querySelectorAll(selector)];
 let state={blinds:{},groups:{},adapters:{},_web:{}};
 let authSession={authenticated:false,csrf_token:'',username:'',role:'owner',setup_required:false};
-const pending=new Set();
-const activeRequests=new Map();
+const pending=new Map();
 const sliderDrafts=new Map();
 const railSelections=new Map();
 const expandedSections=new Set();
@@ -15,11 +14,8 @@ function toast(message,type='success',timeout=4500){const item=document.createEl
 function formatTime(epoch){if(!epoch)return'Waiting for signal';return new Date(epoch*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}
 function draftKey(id,action){return`${id}:${action}`}
 function draftValue(id,action,fallback){const key=draftKey(id,action);return sliderDrafts.has(key)?sliderDrafts.get(key):fallback}
-function pendingKey(targetType,id,action){return`${targetType}:${id}:${action}`}
-function targetPending(targetType,id){return[...pending].some(key=>key.startsWith(`${targetType}:${id}:`))}
-function movementPending(targetType,id){
-  return[...pending].some(key=>key.startsWith(`${targetType}:${id}:`)&&!key.endsWith(':stop'));
-}
+function pendingKey(targetType,id,action,position=null){return`${targetType}:${id}:${action}${position==null?'':`:${position}`}`}
+function targetPending(targetType,id){return[...pending.keys()].some(key=>key.startsWith(`${targetType}:${id}:`))}
 function requireAuth(response){if(response.status===401){window.location.replace('/login');throw new Error('Session expired.')}return response}
 function csrfHeaders(){return{'X-CSRF-Token':authSession.csrf_token}}
 async function loadAuthSession(){const response=requireAuth(await fetch('/api/auth/session'));if(!response.ok)throw new Error('Authentication unavailable');authSession=await response.json();if(authSession.setup_required)window.location.replace('/login')}
@@ -27,35 +23,44 @@ async function getState(){const response=requireAuth(await fetch('/api/state'));
 
 async function command(id,action,position=null,targetType='blind'){
   if(!state._web.live_controls){toast('Live controls are disabled.','error');return}
-  const activeKey=pendingKey(targetType,id,action);
+  const activeKey=pendingKey(targetType,id,action,position);
+  if(pending.has(activeKey))return;
   const targetKey=`${targetType}:${id}`;
   if(action==='stop'){
-    activeRequests.get(targetKey)?.abort();
-    for(const key of [...pending])if(key.startsWith(`${targetKey}:`))pending.delete(key);
+    for(const [key,request] of pending){
+      if(key.startsWith(`${targetKey}:`)){request.abort();pending.delete(key)}
+    }
   }
   const requestController=new AbortController();
-  activeRequests.set(targetKey,requestController);
-  pending.add(activeKey);render();
+  pending.set(activeKey,requestController);render();
   let completed=false;
   try{
     const response=requireAuth(await fetch(`/api/${targetType==='group'?'groups':'blinds'}/${encodeURIComponent(id)}/commands`,{method:'POST',headers:{'Content-Type':'application/json',...csrfHeaders()},body:JSON.stringify({action,...(position==null?{}:{position})}),signal:requestController.signal}));
     const body=await response.json();
     if(!response.ok)throw new Error(body.error||'Command rejected');
-    const outcome=body.result?.outcome||body.result?.successful;
-    completed=action==='refresh_status'||outcome==='completed'||outcome===true;
-    const message=action==='refresh_status'?'Status updated.':completed?'Movement confirmed.':'Command finished; check the reported position.';
-    toast(message,completed?'success':'error',6000);
+    const result=body.result;
+    const outcomes=result?.results
+      ? Object.values(result.results).map(member=>member.outcome)
+      : [result?.outcome];
+    const hasPreparationErrors=Object.keys(result?.preparation_errors||{}).length>0;
+    completed=action==='refresh_status'||(!hasPreparationErrors&&outcomes.length>0
+      &&outcomes.every(outcome=>outcome==='completed'));
+    const duplicate=!hasPreparationErrors&&outcomes.includes('duplicate')
+      &&outcomes.every(outcome=>outcome==='completed'||outcome==='duplicate');
+    if(action==='refresh_status')toast('Status updated.','success',6000);
+    else if(completed)toast('Movement confirmed.','success',6000);
+    else if(duplicate)toast('Matching commands were already accepted.','info',6000);
+    else toast(result?.error||'Command finished; check the reported position.','error',6000);
   }catch(error){if(error.name!=='AbortError')toast(error.message,'error',6000)}
   finally{
-    if(completed&&position!=null)sliderDrafts.delete(draftKey(id,action));
-    if(activeRequests.get(targetKey)===requestController)activeRequests.delete(targetKey);
-    pending.delete(activeKey);
+    if(completed&&position!=null&&sliderDrafts.get(draftKey(id,action))===position)sliderDrafts.delete(draftKey(id,action));
+    if(pending.get(activeKey)===requestController)pending.delete(activeKey);
     await refresh();
   }
 }
 
 function button(label,action,id,kind='secondary',targetType='blind'){
-  const blocked=action==='stop'?pending.has(pendingKey(targetType,id,action)):movementPending(targetType,id);
+  const blocked=action==='refresh_status'?targetPending(targetType,id):pending.has(pendingKey(targetType,id,action));
   return`<button class="button ${kind}" data-command="${esc(action)}" data-target="${esc(id)}" data-target-type="${esc(targetType)}" ${blocked||!state._web.live_controls?'disabled':''}>${esc(label)}</button>`;
 }
 function bindCommands(root=document){root.querySelectorAll('[data-command]').forEach(node=>node.addEventListener('click',()=>command(node.dataset.target,node.dataset.command,node.dataset.position==null?null:Number(node.dataset.position),node.dataset.targetType))) }
@@ -71,7 +76,7 @@ function groupCard(id,item){
 function slider(id,label,action,value,startLabel,endLabel){
   const safe=draftValue(id,action,value??50);
   const unknown=value==null&&!sliderDrafts.has(draftKey(id,action));
-  return`<div class="slider-row" data-position-control="${esc(action)}"><label><span>${esc(label)}</span><output>${esc(unknown?'Unknown':`${safe}%`)}</output></label><input type="range" min="0" max="100" value="${safe}" data-slider data-action="${esc(action)}" aria-label="${esc(label)}"><div class="range-labels"><span>${esc(startLabel)}</span><span>${esc(endLabel)}</span></div><div class="slider-actions"><button class="button secondary compact" data-command="${esc(action)}" data-target="${esc(id)}" data-target-type="blind" data-position="${safe}" ${movementPending('blind',id)||!state._web.live_controls?'disabled':''}>Set</button></div></div>`;
+  return`<div class="slider-row" data-position-control="${esc(action)}"><label><span>${esc(label)}</span><output>${esc(unknown?'Unknown':`${safe}%`)}</output></label><input type="range" min="0" max="100" value="${safe}" data-slider data-action="${esc(action)}" aria-label="${esc(label)}"><div class="range-labels"><span>${esc(startLabel)}</span><span>${esc(endLabel)}</span></div><div class="slider-actions"><button class="button secondary compact" data-command="${esc(action)}" data-target="${esc(id)}" data-target-type="blind" data-position="${safe}" ${pending.has(pendingKey('blind',id,action,safe))||!state._web.live_controls?'disabled':''}>Set</button></div></div>`;
 }
 
 function applyVisual(card,id,item){
@@ -113,7 +118,9 @@ function blindCard(id,item){
     sliderDrafts.set(draftKey(id,action),Number(range.value));
     const row=range.closest('.slider-row');
     row.querySelector('output').textContent=`${range.value}%`;
-    row.querySelector('[data-position]').dataset.position=range.value;
+    const applyButton=row.querySelector('[data-position]');
+    applyButton.dataset.position=range.value;
+    applyButton.disabled=!state._web.live_controls||pending.has(pendingKey('blind',id,action,Number(range.value)));
     applyVisual(card,id,item);
   }));
   applyVisual(card,id,item);

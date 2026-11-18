@@ -35,11 +35,13 @@ adapter's software radio block and request power through BlueZ. The service
 account needs permission for both operations. Recovery leaves hardware blocks
 in effect.
 
-If a new command ID arrives while a blind is executing a command, the
-dispatcher replaces the new request with a STOP and discards both requests.
-Resubmitting an existing command ID remains idempotent. An explicit STOP
-retains its normal result, while movement requests during a conflict STOP are
-discarded. Check the returned result to confirm the STOP succeeded.
+If a different action, rail, or position arrives while a blind is executing a
+command, the dispatcher cancels the active command and sends STOP. After STOP
+is confirmed, it executes the latest pending movement request. Matching
+in-flight targets are suppressed, and resubmitting a command ID remains
+idempotent. An explicit STOP clears pending movement. A synchronized group
+can stop busy members immediately and releases replacement movements only
+after readiness and confirmed stops allow them under its group policy.
 
 MQTT Discovery publishes native Home Assistant shade covers, including a
 command-only full-shade Open/Close/Stop cover for each TDBU motor alongside its

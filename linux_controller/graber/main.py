@@ -30,7 +30,7 @@ def publish_command_lifecycle(
     controller: Controller, event: str, fields: dict[str, object]
 ) -> None:
     """Translate BLE write telemetry into user-visible command progress."""
-    if event != "gatt_write_acknowledged":
+    if event != "gatt_write_acknowledged" or fields.get("internal") is True:
         return
     blind_id = fields.get("blind_id")
     command_id = fields.get("command_id")

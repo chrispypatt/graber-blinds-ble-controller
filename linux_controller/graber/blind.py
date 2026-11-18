@@ -37,6 +37,7 @@ class BlindCommand:
     rail: Rail | None = None
     position: int | None = None  # raw motor coordinate; boundaries convert HA values
     received_at: float = field(default_factory=time.time)
+    internal: bool = False
 
 
 @dataclass
@@ -235,7 +236,8 @@ class BlindController:
                         effectful_write_acked = effectful_write_acked or step.effectful
                         self._emit("gatt_write_acknowledged", command_id=command.id, step=index + 1,
                                    steps=len(steps), adapter_id=runtime.config.id,
-                                   write_ack_ms=write_ack_ms, effectful=step.effectful)
+                                   write_ack_ms=write_ack_ms, effectful=step.effectful,
+                                   internal=command.internal)
                         if step.delay_after_s:
                             await asyncio.sleep(max(0.0, sent_at + step.delay_after_s - time.monotonic()))
                     result.command_ack_ms = (time.monotonic() - started) * 1000

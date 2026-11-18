@@ -219,7 +219,7 @@ def test_stop_preempts_running_command_and_supersedes_queued_work():
     asyncio.run(scenario())
 
 
-def test_conflicting_command_stops_motion_and_discards_both_requests():
+def test_conflict_stops_motion_and_executes_only_latest_distinct_target():
     class BlockingBlind(FakeBlind):
         def __init__(self):
             self.move_started = asyncio.Event()
@@ -247,30 +247,42 @@ def test_conflicting_command_stops_motion_and_discards_both_requests():
         await asyncio.sleep(0)
         assert [command.kind for command in blind.calls] == [CommandKind.FULL_OPEN]
 
+        same_target = await dispatcher.submit(BlindCommand("equivalent", CommandKind.FULL_OPEN))
+        assert same_target.outcome is Outcome.DUPLICATE
+        assert [command.kind for command in blind.calls] == [CommandKind.FULL_OPEN]
+
         conflict = BlindCommand("conflict", CommandKind.SET_POSITION, position=70)
         stopping = asyncio.create_task(dispatcher.submit(conflict))
         await asyncio.wait_for(blind.stop_started.wait(), 1)
-        burst_result = await dispatcher.submit(BlindCommand("burst", CommandKind.FULL_CLOSE))
-        assert burst_result.outcome is Outcome.FAILED
-        assert not stopping.done()
-        duplicate_conflict = asyncio.create_task(dispatcher.submit(conflict))
+        latest = BlindCommand("latest", CommandKind.FULL_CLOSE)
+        latest_request = asyncio.create_task(dispatcher.submit(latest))
         await asyncio.sleep(0)
-        assert not duplicate_conflict.done()
+        latest_equivalent = await dispatcher.submit(BlindCommand("equivalent-latest", latest.kind))
+        assert latest_equivalent.outcome is Outcome.DUPLICATE
+        assert not latest_request.done()
+        assert (await stopping).outcome is Outcome.FAILED
+
+        duplicate_latest = asyncio.create_task(dispatcher.submit(latest))
+        await asyncio.sleep(0)
+        assert not duplicate_latest.done()
+        assert [command.kind for command in blind.calls] == [
+            CommandKind.FULL_OPEN, CommandKind.STOP,
+        ]
         blind.release_stop.set()
 
-        original_result, duplicate_result, conflict_result, duplicate_stop_result = await asyncio.gather(
-            running, duplicate, stopping, duplicate_conflict,
+        original_result, duplicate_result, latest_result, duplicate_latest_result = await asyncio.gather(
+            running, duplicate, latest_request, duplicate_latest,
         )
-        for result in (original_result, duplicate_result, conflict_result,
-                       duplicate_stop_result, burst_result):
+        for result in (original_result, duplicate_result):
             assert result.outcome is Outcome.FAILED
             assert result.error == "superseded by stop command conflict"
-        assert blind.calls[1].kind is CommandKind.STOP
+        for result in (latest_result, duplicate_latest_result):
+            assert result.outcome is Outcome.COMPLETED
+        assert blind.calls[1].id == "conflict:stop"
         assert blind.calls[1].position is None
-        assert len(blind.calls) == 2
-        assert (await dispatcher.submit(conflict)).outcome is Outcome.DUPLICATE
-        subsequent = await dispatcher.submit(BlindCommand("next", CommandKind.FULL_CLOSE))
-        assert subsequent.outcome is Outcome.COMPLETED
+        assert blind.calls[2] == latest
+        assert len(blind.calls) == 3
+        assert (await dispatcher.submit(latest)).outcome is Outcome.DUPLICATE
         await dispatcher.close()
 
     asyncio.run(scenario())
@@ -320,6 +332,55 @@ def test_superseded_result_does_not_hide_newer_running_stop():
         assert controller.diagnostics_for("blind")["last_command_status"] == "completed"
         assert controller.diagnostics_for("blind")["active_command_id"] is None
         await dispatcher.close()
+
+    asyncio.run(scenario())
+
+
+def test_explicit_stop_disarms_replacement_while_implicit_stop_is_running():
+    class BlockingBlind(FakeBlind):
+        def __init__(self):
+            self.move_started = asyncio.Event()
+            self.stop_started = asyncio.Event()
+            self.release_stop = asyncio.Event()
+            self.calls = []
+
+        async def execute(self, command):
+            self.calls.append(command.id)
+            if command.id == "move":
+                self.move_started.set()
+                await asyncio.Event().wait()
+            if command.id == "replacement:stop":
+                self.stop_started.set()
+                await self.release_stop.wait()
+                return CommandResult(command.id, "blind", Outcome.COMPLETION_UNCONFIRMED)
+            return CommandResult(command.id, "blind", Outcome.COMPLETED)
+
+    async def scenario():
+        blind = BlockingBlind()
+        dispatcher = BlindDispatcher(blind)
+        try:
+            running = asyncio.create_task(dispatcher.submit(
+                BlindCommand("move", CommandKind.FULL_OPEN)
+            ))
+            await asyncio.wait_for(blind.move_started.wait(), 1)
+            replacement = asyncio.create_task(dispatcher.submit(
+                BlindCommand("replacement", CommandKind.FULL_CLOSE)
+            ))
+            await asyncio.wait_for(blind.stop_started.wait(), 1)
+            explicit = asyncio.create_task(dispatcher.submit(
+                BlindCommand("explicit", CommandKind.STOP)
+            ))
+            assert (await asyncio.wait_for(replacement, 1)).outcome is Outcome.FAILED
+            fresh = asyncio.create_task(dispatcher.submit(
+                BlindCommand("fresh", CommandKind.FAVORITE)
+            ))
+            blind.release_stop.set()
+            assert (await asyncio.wait_for(running, 1)).outcome is Outcome.FAILED
+            assert (await asyncio.wait_for(explicit, 1)).outcome is Outcome.COMPLETED
+            assert (await asyncio.wait_for(fresh, 1)).outcome is Outcome.COMPLETED
+            assert blind.calls == ["move", "replacement:stop", "explicit", "fresh"]
+        finally:
+            await dispatcher.close()
 
     asyncio.run(scenario())
 
