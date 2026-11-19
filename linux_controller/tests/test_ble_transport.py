@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import graber.ble_transport as ble_transport
 from graber.ble_transport import BleakConnection, BleakTransport
@@ -124,6 +125,57 @@ def test_connect_failure_discards_stale_device_for_reconnect_scan():
         else:
             raise AssertionError("connect should fail")
         assert transport._advertisements == {}
+
+    asyncio.run(scenario())
+
+
+def test_connect_metrics_track_only_attempt_device_and_count_hidden_reconnects():
+    async def scenario():
+        transport = make_transport()
+        observer = ble_transport._BluezPhaseObserver()
+        transport._phase_observer = observer
+        device = FakeDevice()
+        device.details = {"path": "/org/bluez/hci9/dev_11_22_33_44_55_66"}
+        path = device.details["path"]
+
+        async def subscribe():
+            return True
+
+        def signal(signal_path, **properties):
+            observer._on_message(SimpleNamespace(
+                path=signal_path,
+                message_type=SimpleNamespace(name="SIGNAL"),
+                interface="org.freedesktop.DBus.Properties",
+                member="PropertiesChanged",
+                signature="sa{sv}as",
+                body=["org.bluez.Device1", {
+                    key: SimpleNamespace(value=value) for key, value in properties.items()
+                }, []],
+            ))
+
+        class Client:
+            def __init__(self, _device, **_kwargs):
+                pass
+
+            async def connect(self):
+                signal("/org/bluez/hci8/dev_11_22_33_44_55_66", Connected=True)
+                signal(path, Connected=True)
+                signal(path, Connected=False)
+                signal(path, Connected=True)
+                signal(path, ServicesResolved=True)
+
+        observer.ensure_subscribed = subscribe
+        transport._client_type = Client
+        found = transport._discovered(device, FakeAdvertisement())
+        connection = await transport.connect(found, "hci9", 0.1)
+        metrics = connection.connection_phase_metrics
+        assert metrics["bluez_link_up_count"] == 2
+        assert metrics["bluez_link_drop_count"] == 1
+        assert 0 <= metrics["bluez_first_link_ms"] <= metrics["bluez_last_link_ms"]
+        assert 0 <= metrics["bluez_service_resolution_ms"]
+        assert metrics["bluez_last_link_ms"] <= metrics["bluez_services_resolved_ms"]
+        assert all(isinstance(value, (int, float)) for value in metrics.values())
+        assert observer.pending == {}
 
     asyncio.run(scenario())
 

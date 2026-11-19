@@ -204,10 +204,6 @@ class BlindController:
                 effectful_write_acked = False
                 connection_ready = False
                 try:
-                    cold = not (self._session and self._session.connection.connected)
-                    if cold:
-                        self._emit("connection_attempt_started", command_id=command.id, attempt=attempt,
-                                   adapter_id=runtime.config.id)
                     session, timings = await self._ensure_session(runtime, command.id, attempt)
                     connection_ready = True
                     result.cold_queue_ms = timings.get("cold_queue_ms", result.cold_queue_ms)
@@ -312,7 +308,7 @@ class BlindController:
             self._emit("command_failed", **self._result_fields(result))
             return result
 
-    async def prepare(self) -> str:
+    async def prepare(self, *, command_id: str | None = None) -> str:
         """Prepare and authenticate a connection without issuing a movement command."""
         async with self._lock:
             if self._closed:
@@ -321,16 +317,17 @@ class BlindController:
                 await self._drop_session("stale_connection")
             candidates = [self._session.adapter] if self._session else await self._adapters.candidates(self.config)
             last_error: BaseException | None = None
-            for runtime in candidates:
+            for attempt, runtime in enumerate(candidates, 1):
                 prepare_started = time.monotonic()
                 try:
                     session, timings = await self._ensure_session(
-                        runtime, operation="group_prepare"
+                        runtime, command_id=command_id, attempt=attempt, operation="group_prepare"
                     )
                     session.last_used = time.monotonic()
                     self._schedule_close(session)
                     self._emit(
-                        "prepared", adapter_id=runtime.config.id,
+                        "prepared", command_id=command_id, attempt=attempt,
+                        adapter_id=session.adapter.config.id,
                         cold_queue_ms=timings.get("cold_queue_ms"),
                         discovery_ms=timings.get("discovery_ms"),
                         connect_ms=timings.get("connect_ms"),
@@ -345,7 +342,8 @@ class BlindController:
                     last_error = exc
                     self._adapters.record_failure(runtime, exc)
                     self._emit(
-                        "prepare_failed", adapter_id=runtime.config.id,
+                        "prepare_failed", command_id=command_id, attempt=attempt,
+                        adapter_id=runtime.config.id,
                         total_latency_ms=(time.monotonic() - prepare_started) * 1000,
                         error_category=self._error_category(exc),
                         error=f"{type(exc).__name__}: {exc}",
@@ -444,70 +442,93 @@ class BlindController:
                 "warm_connection": 1.0,
                 "connection_age_ms": connection_age_ms,
             }
-        if runtime.resolved is None:
-            raise CommandFailure(f"adapter {runtime.config.id} is unavailable")
-        await runtime.connection_slots.acquire()
+        context = {
+            "command_id": command_id, "attempt": attempt, "adapter_id": runtime.config.id,
+            "operation": operation, "max_connections": runtime.config.max_connections,
+            "max_cold_connections": runtime.config.max_cold_connections,
+            "cold_start_spacing_s": runtime.config.cold_start_spacing_s,
+        }
+        phase = "active_slot"
+        phase_started = time.monotonic()
+        if command_id is not None:
+            self._emit("connection_attempt_started", **context)
+        active_slot = False
         connection: BleConnection | None = None
+        timings: dict[str, float] = {}
+        bluez: dict[str, object] = {}
         try:
+            if runtime.resolved is None:
+                raise CommandFailure(f"adapter {runtime.config.id} is unavailable")
+            await runtime.connection_slots.acquire()
+            active_slot = True
+            timings["active_queue_ms"] = (time.monotonic() - phase_started) * 1000
+            phase = "cold_slot"
+            phase_started = time.monotonic()
             async with self._adapters.cold_connection(runtime) as cold_queue_ms:
+                timings["cold_queue_ms"] = cold_queue_ms
                 if command_id is not None:
-                    self._emit(
-                        "cold_connection_slot_acquired", command_id=command_id,
-                        attempt=attempt, adapter_id=runtime.config.id,
-                        cold_queue_ms=cold_queue_ms, operation=operation,
-                    )
-                discover_started = time.monotonic()
+                    self._emit("cold_connection_slot_acquired", **context, **timings)
+                phase = "discovery"
+                phase_started = time.monotonic()
                 device = await self._transport.discover(self.config.address, runtime.resolved.device,
                                                         self._retry.connect_timeout_s)
-                discovery_ms = (time.monotonic() - discover_started) * 1000
+                timings["discovery_ms"] = (time.monotonic() - phase_started) * 1000
                 self.observe_advertisement(device)
-                connect_started = time.monotonic()
+                phase = "connect"
+                phase_started = time.monotonic()
                 connection = await self._transport.connect(device, runtime.resolved.device,
                                                             self._retry.connect_timeout_s)
-                connect_ms = (time.monotonic() - connect_started) * 1000
+                timings["connect_ms"] = (time.monotonic() - phase_started) * 1000
+                bluez = getattr(connection, "connection_phase_metrics", {}) or {}
                 if command_id is not None:
-                    self._emit("connection_attempt_succeeded", command_id=command_id, attempt=attempt,
-                               adapter_id=runtime.config.id, discovery_ms=discovery_ms,
-                               connect_ms=connect_ms, cold_queue_ms=cold_queue_ms,
-                               operation=operation)
+                    self._emit(
+                        "connection_attempt_succeeded", **context, **timings, **bluez,
+                        advertisement_rssi=device.rssi,
+                    )
             setup_started = time.monotonic()
             notify_started = setup_started
+            phase = "notify_bottom"
+            phase_started = notify_started
             await asyncio.wait_for(
                 connection.start_notify(BOTTOM_POSITION_CHARACTERISTIC, self._notification(Rail.BOTTOM)),
                 self._retry.gatt_timeout_s,
             )
             if self.config.dual_rail:
+                phase = "notify_top"
+                phase_started = time.monotonic()
                 await asyncio.wait_for(
                     connection.start_notify(TOP_POSITION_CHARACTERISTIC, self._notification(Rail.TOP)),
                     self._retry.gatt_timeout_s,
                 )
-            notify_setup_ms = (time.monotonic() - notify_started) * 1000
-            auth_started = time.monotonic()
+            timings["notify_setup_ms"] = (time.monotonic() - notify_started) * 1000
+            phase = "auth"
+            phase_started = time.monotonic()
             await asyncio.wait_for(connection.write(AUTH_CHARACTERISTIC, auth_payload(self.config.access_code)),
                                    self._retry.gatt_timeout_s)
-            auth_ms = (time.monotonic() - auth_started) * 1000
-            gatt_setup_ms = (time.monotonic() - setup_started) * 1000
+            timings["auth_ms"] = (time.monotonic() - phase_started) * 1000
+            timings["gatt_setup_ms"] = (time.monotonic() - setup_started) * 1000
             self._session = _Session(connection, runtime, time.monotonic())
             self._adapters.record_success(runtime)
-            self._emit("connection_ready", command_id=command_id, attempt=attempt,
-                       adapter_id=runtime.config.id, cold_queue_ms=cold_queue_ms,
-                       discovery_ms=discovery_ms, connect_ms=connect_ms,
-                       notify_setup_ms=notify_setup_ms, auth_ms=auth_ms,
-                       gatt_setup_ms=gatt_setup_ms, warm_connection=False,
-                       operation=operation)
-            return self._session, {"cold_queue_ms": cold_queue_ms,
-                                   "discovery_ms": discovery_ms, "connect_ms": connect_ms,
-                                   "notify_setup_ms": notify_setup_ms,
-                                   "auth_ms": auth_ms, "gatt_setup_ms": gatt_setup_ms,
-                                   "warm_connection": 0.0,
-                                   "connection_age_ms": 0.0}
-        except BaseException:
+            self._emit(
+                "connection_ready", **context, **timings, **bluez,
+                advertisement_rssi=device.rssi, warm_connection=False,
+            )
+            return self._session, {**timings, "warm_connection": 0.0, "connection_age_ms": 0.0}
+        except BaseException as exc:
+            phase_elapsed_ms = (time.monotonic() - phase_started) * 1000
             if connection:
                 try:
                     await connection.disconnect()
                 except BaseException:
                     pass
-            runtime.connection_slots.release()
+            if active_slot:
+                runtime.connection_slots.release()
+            self._emit(
+                "connection_phase_failed", **context, **timings,
+                **(getattr(exc, "connection_phase_metrics", None) or bluez),
+                phase=phase, phase_elapsed_ms=phase_elapsed_ms,
+                error_category="cancelled" if isinstance(exc, asyncio.CancelledError) else self._error_category(exc),
+            )
             raise
 
     async def _await_feedback(self, command: BlindCommand, baseline: dict[Rail, int],

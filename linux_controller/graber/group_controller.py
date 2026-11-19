@@ -221,7 +221,9 @@ class Controller:
 
                 async def prepare(blind_id: str) -> None:
                     try:
-                        await self.dispatchers[blind_id].blind.prepare()
+                        await self.dispatchers[blind_id].blind.prepare(
+                            command_id=f"{command_id}:{blind_id}",
+                        )
                     except Exception as exc:
                         preparation_errors[blind_id] = f"{type(exc).__name__}: {exc}"
 

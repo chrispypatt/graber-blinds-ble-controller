@@ -78,7 +78,10 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
     def service_telemetry(event: str, fields: dict[str, object]) -> None:
         telemetry(event, fields)
         if metrics:
-            metrics.record(event, fields)
+            try:
+                metrics.record(event, fields)
+            except OSError as exc:
+                LOG.warning("Could not persist controller metrics: %s", type(exc).__name__)
         controller = controller_ref.get("controller")
         if controller is not None:
             publish_command_lifecycle(controller, event, fields)

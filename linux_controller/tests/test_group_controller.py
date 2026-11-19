@@ -18,7 +18,7 @@ class FakeBlind:
         self.prepare_calls = 0
         self.refreshes = 0
 
-    async def prepare(self):
+    async def prepare(self, *, command_id=None):
         self.prepare_calls += 1
         if self.prepare_error:
             self._session = None
@@ -339,7 +339,8 @@ def test_synchronized_group_stops_busy_member_then_honors_readiness(failure):
         preparing = asyncio.Event()
         release = asyncio.Event()
 
-        async def prepare_idle():
+        async def prepare_idle(*, command_id):
+            assert command_id == "group-close:idle"
             preparing.set()
             await release.wait()
             if failure == "prepare":
@@ -403,7 +404,7 @@ def test_explicit_stop_invalidates_movement_during_synchronized_preparation():
             self.release = asyncio.Event()
             self.commands = []
 
-        async def prepare(self):
+        async def prepare(self, *, command_id=None):
             self.preparing.set()
             await self.release.wait()
 

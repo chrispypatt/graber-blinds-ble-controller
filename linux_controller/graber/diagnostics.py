@@ -70,7 +70,8 @@ class JsonlMetricsWriter:
     RECORDED_EVENTS = {
         "command_received", "cold_connection_slot_acquired",
         "connection_attempt_started", "connection_attempt_succeeded",
-        "connection_attempt_failed", "connection_ready",
+        "connection_attempt_failed", "connection_ready", "connection_reused",
+        "connection_phase_failed", "prepared", "prepare_failed",
         "gatt_write_acknowledged", "feedback_observed", "feedback_completed",
         "movement_observed", "command_retry_scheduled", "command_completed",
         "command_failed", "command_completion_unconfirmed", "disconnected",
@@ -98,6 +99,9 @@ class JsonlMetricsWriter:
                 pass
             self.path.replace(backup)
         row = {"event": event, "recorded_at": time.time(), **fields}
+        if event == "prepare_failed":
+            # BlueZ exception text may embed a device path. Keep the category.
+            row.pop("error", None)
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
 
@@ -388,6 +392,8 @@ LATENCY_FIELDS: dict[str, tuple[str, ...]] = {
     "cold_queue_ms": ("cold_queue_ms",),
     "advertisement_latency_ms": ("advertisement_latency_ms", "discovery_ms"),
     "connection_latency_ms": ("connection_latency_ms", "connect_ms"),
+    "bluez_first_link_ms": ("bluez_first_link_ms",),
+    "bluez_service_resolution_ms": ("bluez_service_resolution_ms",),
     "notification_setup_latency_ms": ("notification_setup_latency_ms", "notify_setup_ms"),
     "gatt_setup_latency_ms": ("gatt_setup_latency_ms", "gatt_setup_ms"),
     "authentication_latency_ms": ("authentication_latency_ms", "auth_ms"),
@@ -414,6 +420,8 @@ _PREFERRED_METRIC_EVENTS: dict[str, tuple[str, ...]] = {
     "cold_queue_ms": ("connection_attempt_succeeded",),
     "advertisement_latency_ms": ("connection_attempt_succeeded",),
     "connection_latency_ms": ("connection_attempt_succeeded",),
+    "bluez_first_link_ms": ("connection_ready", "connection_phase_failed"),
+    "bluez_service_resolution_ms": ("connection_ready", "connection_phase_failed"),
     "notification_setup_latency_ms": ("connection_ready",),
     "gatt_setup_latency_ms": ("connection_ready",),
     "authentication_latency_ms": ("connection_ready",),
@@ -598,7 +606,12 @@ def summarize_operations(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]
             by_adapter.setdefault(str(row["adapter_id"]), []).append(row)
 
     failures: dict[str, int] = {}
+    group_phase_failures: dict[str, int] = {}
     for row in rows:
+        if row.get("event") == "connection_phase_failed" and row.get("operation") == "group_prepare":
+            phase = str(row.get("phase", "unknown"))
+            key = f"{phase}:{_failure_category(row)}"
+            group_phase_failures[key] = group_phase_failures.get(key, 0) + 1
         if row.get("event") in {
             "connection_attempt_failed", "command_failed", "command_completion_unconfirmed",
         }:
@@ -671,6 +684,7 @@ def summarize_operations(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]
         },
         "samples": len(terminal),
         "connection_attempts": len(connection_starts),
+        "group_connection_phase_failures": group_phase_failures,
         "first_attempt_connection_success": (
             sum(int(row.get("attempt", 0)) == 1 for row in connection_successes) /
             sum(int(row.get("attempt", 0)) == 1 for row in connection_starts)
