@@ -392,6 +392,10 @@ def test_refresh_status_reads_rails_and_battery_without_movement_write():
         assert (state.bottom, state.top, state.battery) == (31, 71, 88)
         assert connection.writes == [(AUTH_CHARACTERISTIC, b"0123456")]
         assert blind._transport.connect_calls == 1
+        assert not connection.connected
+        assert blind._session is None
+        disconnected = [fields for event, fields in events if event == "disconnected"]
+        assert [fields["reason"] for fields in disconnected] == ["status_refresh_finished"]
         refreshed = [fields for event, fields in events if event == "status_refreshed"]
         assert len(refreshed) == 1
         assert refreshed[0]["total_latency_ms"] >= 0
@@ -401,4 +405,83 @@ def test_refresh_status_reads_rails_and_battery_without_movement_write():
         ready = [fields for event, fields in events if event == "connection_ready"]
         assert ready[0]["operation"] == "status_refresh"
         await blind.close()
+    asyncio.run(scenario())
+
+
+def test_status_refresh_borrows_movement_session_without_extending_its_hold():
+    async def scenario():
+        connection = FakeConnection(reads={
+            BOTTOM_POSITION_CHARACTERISTIC: b"\x2a",
+            BATTERY_CHARACTERISTIC: b"\x58",
+        })
+        blind = make_controller(connection)
+        try:
+            command = BlindCommand("one", CommandKind.SET_POSITION, Rail.BOTTOM, 42)
+            assert (await blind.execute(command)).outcome is Outcome.COMPLETED
+            assert blind.state.battery == 88
+            session = blind._session
+            close_task = session.close_task
+            last_used = session.last_used
+
+            connection.reads[BATTERY_CHARACTERISTIC] = b"\x59"
+            assert (await blind.refresh_status()).battery == 89
+            assert connection.connected
+            assert blind._transport.connect_calls == 1
+            assert blind._session is session
+            assert session.close_task is close_task
+            assert session.last_used == last_used
+        finally:
+            await blind.close()
+    asyncio.run(scenario())
+
+
+def test_cancelled_status_refresh_releases_its_connection():
+    class BlockingBatteryConnection(FakeConnection):
+        def __init__(self):
+            super().__init__()
+            self.read_started = asyncio.Event()
+
+        async def read(self, characteristic):
+            if characteristic == BATTERY_CHARACTERISTIC:
+                self.read_started.set()
+                await asyncio.Future()
+            return await super().read(characteristic)
+
+    async def scenario():
+        connection = BlockingBatteryConnection()
+        blind = make_controller(connection)
+        refresh = asyncio.create_task(blind.refresh_status())
+        await asyncio.wait_for(connection.read_started.wait(), timeout=1)
+        refresh.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await refresh
+        assert not connection.connected
+        assert blind._session is None
+    asyncio.run(scenario())
+
+
+def test_cancellation_does_not_interrupt_status_disconnect():
+    class SlowDisconnectConnection(FakeConnection):
+        def __init__(self):
+            super().__init__()
+            self.disconnect_started = asyncio.Event()
+            self.finish_disconnect = asyncio.Event()
+
+        async def disconnect(self):
+            self.disconnect_started.set()
+            await self.finish_disconnect.wait()
+            await super().disconnect()
+
+    async def scenario():
+        connection = SlowDisconnectConnection()
+        blind = make_controller(connection)
+        refresh = asyncio.create_task(blind.refresh_status())
+        await asyncio.wait_for(connection.disconnect_started.wait(), timeout=1)
+        refresh.cancel()
+        await asyncio.sleep(0)
+        assert blind._lock.locked()
+        connection.finish_disconnect.set()
+        with pytest.raises(asyncio.CancelledError):
+            await refresh
+        assert not connection.connected
     asyncio.run(scenario())

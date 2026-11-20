@@ -362,6 +362,8 @@ class BlindController:
             last_error: BaseException | None = None
             for runtime in candidates:
                 refresh_started = time.monotonic()
+                session_to_keep = self._session
+                disconnect_reason = "status_refresh_finished"
                 try:
                     session, timings = await self._ensure_session(
                         runtime, operation="status_refresh"
@@ -398,8 +400,6 @@ class BlindController:
                         self._emit("battery_read_failed", source="status_refresh",
                                    error_category=self._error_category(exc),
                                    error=f"{type(exc).__name__}: {exc}")
-                    session.last_used = time.monotonic()
-                    self._schedule_close(session)
                     self._emit("status_refreshed", adapter_id=runtime.config.id,
                                battery_available=self.state.battery is not None,
                                cold_queue_ms=timings.get("cold_queue_ms"),
@@ -422,14 +422,25 @@ class BlindController:
                         error_category=self._error_category(exc),
                         error=f"{type(exc).__name__}: {exc}",
                     )
-                    await self._drop_session("status_refresh_failed")
+                    session_to_keep = None
+                    disconnect_reason = "status_refresh_failed"
+                finally:
+                    if self._session is not None and self._session is not session_to_keep:
+                        cleanup = asyncio.create_task(self._drop_session(disconnect_reason))
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            # Keep the blind locked until the in-flight disconnect finishes.
+                            await cleanup
+                            raise
             raise CommandFailure(f"status refresh failed: {last_error}")
 
     async def _ensure_session(self, runtime: AdapterRuntime, command_id: str | None = None,
                               attempt: int | None = None,
                               operation: str = "command") -> tuple[_Session, dict[str, float]]:
         if self._session and self._session.connection.connected:
-            if self._session.close_task:
+            # A status read borrows a warm link without extending its idle hold.
+            if self._session.close_task and operation != "status_refresh":
                 self._session.close_task.cancel()
                 self._session.close_task = None
             connection_age_ms = (time.monotonic() - self._session.connected_at) * 1000
