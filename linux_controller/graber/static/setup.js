@@ -137,6 +137,12 @@ function applyAdapterInventory(inventory){
       card.querySelector('.identify').disabled=!state.allow_jog||device.bottom_raw==null||
         !device.has_access_code||state.busy||!state.adapters.some(adapter=>adapter.id===select.value&&adapter.powered);
     });
+    if(!$('#setupReviewModal').classList.contains('is-hidden')){
+      const filter=$('#reviewFilter');
+      if(document.activeElement===filter)filter.dataset.refreshAdapters='true';
+      else updateReviewFilters(state.devices.filter(device=>device.enabled));
+      renderSetupReview();
+    }
   }
 }
 
@@ -208,8 +214,76 @@ async function scan(){const seconds=Math.max(3,Math.min(60,Number($('#scanSecond
 async function resumeScan(scanInfo){if(scanMonitorActive)return;scanMonitorActive=true;startScanOverlay(Math.max(1,Number(scanInfo.duration_s)||1),Math.max(0,Number(scanInfo.remaining_s)||0));try{while(true){await new Promise(resolve=>setTimeout(resolve,750));const current=await api('/api/state');if(!current.scan?.active){state=current;render();break}}}catch(error){if(!scanCancelled)toast(error.message,'error')}finally{scanMonitorActive=false;stopScanOverlay()}}
 async function cancelScan(){if($('#scanOverlay').classList.contains('is-hidden'))return;scanCancelled=true;const button=$('#cancelScanButton');button.disabled=true;button.textContent='Stopping…';$('#scanOverlayTitle').textContent='Stopping scan';try{await api('/api/scan/cancel',{method:'POST',body:{}})}catch(error){scanCancelled=false;button.disabled=false;button.textContent='Cancel scan';$('#scanOverlayTitle').textContent='Scanning for shades';toast(error.message,'error')}}
 async function clearScan(){if(!confirm('Clear scan results and reload the saved configuration?'))return;const button=$('#clearScanButton');button.disabled=true;try{await flushSaves();state=await api('/api/scan/clear',{method:'POST',body:{}});dirty.clear();render();toast(state.loaded_saved_devices?'Saved configuration reloaded.':'Scan cleared.')}catch(error){toast(error.message,'error')}finally{button.disabled=false}}
-async function reviewSetup(){await flushSaves();const selected=state.devices.filter(d=>d.enabled);$('#setupReview').innerHTML=`<table class="review-table"><thead><tr><th scope="col">Shade</th><th scope="col">Groups</th><th scope="col">Type</th><th scope="col">Adapter</th></tr></thead><tbody>${selected.map(d=>{const groups=(d.groups||[]).map(groupName);return `<tr><th scope="row"><strong>${esc(d.name)}</strong><small>${esc(d.id)}</small></th><td>${esc(groups.length?groups.join(', '):'Individual only')}</td><td>${d.dual_rail?'TDBU':'Single rail'}</td><td>${esc(adapterLabel(d.preferred_adapter))}</td></tr>`}).join('')}</tbody></table>`;
-  openModal('#setupReviewModal')
+function reviewFields(device){
+  const adapterId=device.preferred_adapter||'';
+  const groups=(device.groups||[]).map(id=>[`group:${id}`,groupName(id)]);
+  const type=device.dual_rail?'TDBU':'Single rail';
+  return {
+    adapter:[[`adapter:${adapterId}`,adapterLabel(adapterId)]],
+    group:groups.length?groups:[['group:','Individual only']],
+    type:[[`type:${type}`,type]],
+  };
+}
+
+function updateReviewFilters(devices){
+  const filter=$('#reviewFilter');
+  const selected=filter.value;
+  filter.replaceChildren(new Option('All shades',''));
+  for(const [field,label] of [['adapter','Bluetooth adapters'],['group','Shade groups'],['type','Shade types']]){
+    const options=new Map(devices.flatMap(device=>reviewFields(device)[field]));
+    if(!options.size)continue;
+    const group=document.createElement('optgroup');
+    group.label=label;
+    for(const [value,name] of [...options].sort((a,b)=>a[1].localeCompare(b[1]))){
+      group.append(new Option(name,value));
+    }
+    filter.append(group);
+  }
+  if([...filter.options].some(option=>option.value===selected))filter.value=selected;
+}
+
+function renderSetupReview(){
+  const grouping=$('#reviewGrouping').value;
+  const filter=$('#reviewFilter').value;
+  const query=$('#reviewSearch').value.trim().toLowerCase();
+  const selected=state.devices.filter(device=>device.enabled);
+  const matching=selected
+    .filter(device=>!query||`${device.name} ${device.id}`.toLowerCase().includes(query))
+    .filter(device=>!filter||Object.values(reviewFields(device)).flat().some(([value])=>value===filter))
+    .sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id));
+  const sections=new Map();
+  for(const device of matching){
+    const fields=reviewFields(device);
+    for(const [key,label] of fields[grouping]||[['','']]){
+      if(!sections.has(key))sections.set(key,{label,devices:[]});
+      sections.get(key).devices.push({device,fields});
+    }
+  }
+  const count=selected.length;
+  const shades=`${count} selected shade${count===1?'':'s'}`;
+  $('#reviewCount').textContent=filter||query
+    ?`Showing ${matching.length} of ${shades}. Save setup includes all selected shades.`
+    :shades;
+  $('#setupReview').innerHTML=matching.length?[...sections.values()]
+    .sort((a,b)=>a.label.localeCompare(b.label))
+    .map(({label,devices})=>`<section class="review-group">
+      ${label?`<h3>${esc(label)}</h3>`:''}
+      <ul>${devices.map(({device,fields})=>`<li class="review-shade">
+        <div><strong>${esc(device.name)}</strong><small>${esc(device.id)}</small></div>
+        <span>${esc(fields.group.map(([,name])=>name).join(', '))}</span>
+        <span>${esc(fields.type[0][1])}${grouping==='adapter'?'':` · ${esc(fields.adapter[0][1])}`}</span>
+      </li>`).join('')}</ul>
+    </section>`).join(''):'<p class="review-no-results">No shades match these filters.</p>';
+}
+
+async function reviewSetup(){
+  await flushSaves();
+  $('#reviewGrouping').value='adapter';
+  $('#reviewFilter').value='';
+  $('#reviewSearch').value='';
+  updateReviewFilters(state.devices.filter(device=>device.enabled));
+  renderSetupReview();
+  openModal('#setupReviewModal');
 }
 async function saveSetup(){const button=$('#confirmSetup');button.disabled=true;button.textContent='Saving…';try{await flushSaves();const result=await api('/api/export',{method:'POST',body:{}});if(result.mode==='control'){button.textContent='Opening controls…';window.location.replace('/');return}closeModal($('#setupReviewModal'));toast('Setup saved.','success')}catch(error){toast(error.message,'error',6500)}finally{button.disabled=false;button.textContent='Save setup'}}
 
@@ -224,3 +298,12 @@ loadAuthSession().then(loadState).then(loaded=>{
   setInterval(pollAdapters,5000);
   document.addEventListener('visibilitychange',pollAdapters);
 }).catch(()=>setConnection('error','Unavailable'));
+$('#reviewGrouping').addEventListener('change',renderSetupReview);
+$('#reviewFilter').addEventListener('change',renderSetupReview);
+$('#reviewFilter').addEventListener('blur',event=>{
+  if(!event.currentTarget.dataset.refreshAdapters)return;
+  delete event.currentTarget.dataset.refreshAdapters;
+  updateReviewFilters(state.devices.filter(device=>device.enabled));
+  renderSetupReview();
+});
+$('#reviewSearch').addEventListener('input',renderSetupReview);
