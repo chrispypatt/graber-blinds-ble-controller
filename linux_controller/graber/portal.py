@@ -454,7 +454,7 @@ def create_app(supervisor: ModeSupervisor, *, allowed_networks: tuple[str, ...],
         if exporting and supervisor.active_commands:
             raise web.HTTPConflict(text="wait for the active setup operation to finish")
         setup_operation = request.method == "POST" and (
-            request.path == "/api/scan" or request.path.startswith("/api/devices/")
+            request.path == "/api/scan" or request.path.startswith(("/api/devices/", "/api/adapters/"))
         )
         command_request = is_command_request(request.method, request.path) or setup_operation
         if exporting:

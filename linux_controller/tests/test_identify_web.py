@@ -1,6 +1,7 @@
 import asyncio
 import stat
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,65 @@ def test_explicit_adapter_selection_is_exact_and_validated():
         assert "unavailable" in str(exc)
     else:
         raise AssertionError("an unavailable explicit controller must fail")
+
+
+def test_setup_discovers_hotplug_and_saves_new_usb_adapter(tmp_path: Path, monkeypatch):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    original, key = make_session(tmp_path)
+    original.configure(key, {"name": "Living Left", "access_code": "0123456"})
+    config_path, secrets_path = original.export()
+    saved = load_saved_setup(config_path, secrets_path)
+    existing = original.adapters["usb_1_2_3"]
+    new = AdapterIdentity("hci5", "AA:BB:CC:DD:EE:01", True, "1234", "5678",
+                          usb_product="New USB radio", usb_path="1-2")
+    onboard = AdapterIdentity("hci0", "AA:BB:CC:DD:EE:02", True, None, None)
+    inventory = [existing, onboard]
+    scanned = []
+
+    async def fake_scan(adapter, _seconds):
+        scanned.append(adapter)
+        return []
+
+    monkeypatch.setattr("graber.identify_web.scan", fake_scan)
+    session = SetupSession(inventory, export_dir=tmp_path, saved_setup=saved,
+                           controller_addresses=[existing.address],
+                           adapter_discovery=lambda: list(inventory))
+
+    async def scenario():
+        assert not session.adapter_state()["available_adapters"]
+        inventory.append(new)
+        app = create_app(session, SetupWebSettings(control_token="0123456789abcdef"))
+        headers = {"X-Graber-Control-Token": "0123456789abcdef"}
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/api/adapters", headers=headers)
+            assert response.status == 200
+            assert [row["id"] for row in (await response.json())["available_adapters"]] == ["usb_1_2"]
+            assert list(session.adapters) == ["usb_1_2_3"]
+            response = await client.post("/api/adapters/usb_1_2", headers=headers)
+            assert response.status == 200
+        assert not session.adapter_state()["available_adapters"]
+        assert session.devices[key].preferred_adapter == "usb_1_2_3"
+        assert len(load_config(config_path, secrets_path).adapters) == 1
+        await session.scan_all()
+        assert scanned == [existing, new]
+
+        inventory.remove(new)
+        await session.refresh_adapters()
+        assert session.missing_adapters == 1
+        assert not session.adapter_state()["can_export"]
+        moved = replace(new, hci_name="hci7", usb_path="3-1")
+        inventory.append(moved)
+        await session.refresh_adapters()
+        assert session.adapters["usb_1_2"] == moved
+
+        session.export()
+        reopened = SetupSession(inventory, saved_setup=load_saved_setup(config_path, secrets_path),
+                                controller_addresses=[existing.address])
+        assert set(reopened.adapters) == {"usb_1_2_3", "usb_1_2"}
+        assert reopened.devices[key].preferred_adapter == "usb_1_2_3"
+
+    asyncio.run(scenario())
 
 
 def test_partial_setup_keeps_assignments_and_refuses_export(tmp_path: Path, monkeypatch):
@@ -548,6 +608,8 @@ def test_web_requires_token_and_never_jogs_without_launch_gate(tmp_path: Path):
             assert asset.status == 200
             assert "no-store" in asset.headers["Cache-Control"]
             assert (await client.get("/api/state")).status == 403
+            assert (await client.get("/api/adapters")).status == 403
+            assert (await client.post("/api/adapters/usb_1_2_3")).status == 403
             assert (await client.get(
                 "/api/state", headers={"X-Graber-Control-Token": "0123456789abcdef"}
             )).status == 200
@@ -597,7 +659,7 @@ def test_web_jog_calls_injected_runner_only_when_enabled(tmp_path: Path):
 @pytest.mark.parametrize("addresses", [None, ["AA:BB:CC:DD:EE:FF"]])
 def test_setup_without_powered_adapters_can_open_but_cannot_scan_or_save(tmp_path, addresses):
     adapters = select_usb_adapters([], addresses, allow_partial=True)
-    session = SetupSession(adapters, export_dir=tmp_path, missing_adapters=len(addresses or []))
+    session = SetupSession(adapters, export_dir=tmp_path, controller_addresses=addresses)
     payload = session.state(allow_jog=False)
     assert payload["adapters"] == []
     assert payload["missing_adapters"] == len(addresses or [])

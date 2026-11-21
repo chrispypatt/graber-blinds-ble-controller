@@ -285,30 +285,19 @@ class SetupSession:
                  known_credentials: dict[str, str] | None = None,
                  group_names: tuple[str, ...] = (),
                  saved_setup: SavedSetup | None = None,
-                 missing_adapters: int = 0):
+                 controller_addresses: list[str] | None = None,
+                 adapter_discovery: Callable[[], list[AdapterIdentity]] | None = None):
         self.allow_code_read = allow_code_read
         self.export_dir = Path(export_dir).resolve() if export_dir else None
         self.known_credentials = dict(known_credentials or {})
         self.saved_setup = saved_setup or SavedSetup({}, {})
+        self._controller_addresses = {address.upper() for address in controller_addresses or ()}
+        self._adapter_discovery = adapter_discovery
+        self._known_adapters: dict[str, AdapterIdentity] = {}
+        self._added_adapters: set[str] = set()
+        self._detected_adapters: dict[str, AdapterIdentity] = {}
         self.adapters: dict[str, AdapterIdentity] = {}
-        for item in adapters:
-            saved_ids = [
-                key for key, row in self.saved_setup.adapters.items()
-                if str(row["controller_address"]).upper() == item.address
-            ]
-            if len(saved_ids) > 1:
-                saved_ids = [key for key in saved_ids
-                             if self.saved_setup.adapters[key].get("usb_path") == item.usb_path]
-            adapter_id = saved_ids[0] if len(saved_ids) == 1 else slug(
-                f"usb_{item.usb_path or item.address or item.hci_name}"
-            )
-            if not saved_ids and adapter_id in self.saved_setup.adapters and item.address:
-                adapter_id = slug(f"usb_{item.address}")
-            if adapter_id in self.adapters or (not saved_ids and adapter_id in self.saved_setup.adapters):
-                raise ValueError(f"ambiguous USB adapter assignment for {adapter_id}")
-            self.adapters[adapter_id] = item
-        missing_saved = set(self.saved_setup.adapters).difference(self.adapters)
-        self.missing_adapters = max(missing_adapters, len(missing_saved))
+        self._update_adapters(adapters)
         self.groups: dict[str, str] = {}
         for group_id, name in self.saved_setup.groups.items():
             self.groups[group_id] = name
@@ -322,9 +311,78 @@ class SetupSession:
             self.groups[group_id] = friendly
         self.devices = self._saved_devices()
         self.ble_lock = asyncio.Lock()
+        self._adapter_refresh_lock = asyncio.Lock()
         self.scan_task: asyncio.Task[None] | None = None
         self.scan_started_at: float | None = None
         self.scan_duration_s: float | None = None
+
+    def _update_adapters(self, discovered: list[AdapterIdentity]) -> None:
+        known = {
+            key: (str(row["controller_address"]).upper(), row.get("usb_path"))
+            for key, row in self.saved_setup.adapters.items()
+        }
+        for key, adapter in self._known_adapters.items():
+            known[key] = (adapter.address, adapter.usb_path)
+        available = [
+            item for item in select_usb_adapters(discovered, None, allow_partial=True)
+            if item.address
+        ]
+        detected: dict[str, AdapterIdentity] = {}
+        for item in available:
+            matches = [key for key, (address, _) in known.items() if address == item.address]
+            if len(matches) > 1 or sum(usb.address == item.address for usb in available) > 1:
+                matches = [key for key in matches if known[key][1] == item.usb_path]
+            adapter_id = matches[0] if len(matches) == 1 else slug(
+                f"usb_{item.usb_path or opaque_id(item.address)}"
+            )
+            if not matches and adapter_id in known:
+                adapter_id = f"{adapter_id}_{opaque_id(item.address)}"
+            if adapter_id in detected or (not matches and adapter_id in known):
+                raise ValueError(f"ambiguous USB adapter assignment for {adapter_id}")
+            detected[adapter_id] = item
+        self._known_adapters.update(detected)
+        self._detected_adapters = detected
+        self.adapters = {
+            key: item for key, item in detected.items()
+            if not self._controller_addresses or item.address in self._controller_addresses
+            or key in self.saved_setup.adapters or key in self._added_adapters
+        }
+
+    async def _discover_adapters(self, *, only_if_idle: bool = False) -> None:
+        if self._adapter_discovery:
+            discovered = await asyncio.to_thread(self._adapter_discovery)
+            if not only_if_idle or not self.ble_lock.locked():
+                self._update_adapters(discovered)
+
+    async def refresh_adapters(self) -> None:
+        async with self._adapter_refresh_lock:
+            if not self.ble_lock.locked():
+                await self._discover_adapters(only_if_idle=True)
+
+    async def add_adapter(self, adapter_id: str) -> None:
+        if self.ble_lock.locked():
+            raise ValueError("wait for the active Bluetooth operation to finish")
+        async with self.ble_lock:
+            await self._discover_adapters()
+            if adapter_id not in self._detected_adapters:
+                raise ValueError("this adapter is no longer available")
+            if adapter_id not in self.adapters:
+                self._added_adapters.add(adapter_id)
+                self.adapters[adapter_id] = self._detected_adapters[adapter_id]
+
+    def _missing_adapter_ids(self) -> set[str]:
+        required = set(self.saved_setup.adapters) | self._added_adapters
+        required.update(device.preferred_adapter for device in self.devices.values()
+                        if device.enabled and device.preferred_adapter)
+        return required.difference(self.adapters)
+
+    @property
+    def missing_adapters(self) -> int:
+        missing = self._missing_adapter_ids()
+        known_addresses = {item.address for item in self.adapters.values()}
+        known_addresses.update(str(self.saved_setup.adapters[key]["controller_address"]).upper()
+                               for key in missing if key in self.saved_setup.adapters)
+        return len(missing) + len(self._controller_addresses.difference(known_addresses))
 
     def _saved_devices(self) -> dict[str, DeviceSetup]:
         return {
@@ -338,9 +396,10 @@ class SetupSession:
         }
 
     async def scan_all(self, seconds: float = 12) -> None:
-        if not self.adapters:
-            raise ValueError("no powered USB Bluetooth adapters available for scanning")
         async with self.ble_lock:
+            await self._discover_adapters()
+            if not self.adapters:
+                raise ValueError("no powered USB Bluetooth adapters available for scanning")
             results = await asyncio.gather(*(scan(item, seconds) for item in self.adapters.values()))
             for adapter_id, motors in zip(self.adapters, results):
                 for motor in motors:
@@ -414,26 +473,37 @@ class SetupSession:
             "remaining_s": max(0, duration - elapsed),
         }
 
+    def adapter_state(self) -> dict[str, Any]:
+        def row(adapter_id: str, adapter: AdapterIdentity) -> dict[str, Any]:
+            return {
+                "id": adapter_id, "usb_path": adapter.usb_path,
+                "product": adapter.usb_product, "powered": adapter.powered,
+            }
+
+        missing = self.missing_adapters
+        missing_rows = []
+        for adapter_id in sorted(self._missing_adapter_ids()):
+            adapter = self._known_adapters.get(adapter_id)
+            saved_path = self.saved_setup.adapters.get(adapter_id, {}).get("usb_path")
+            missing_rows.append({
+                "id": adapter_id,
+                "usb_path": adapter.usb_path if adapter else saved_path,
+                "product": adapter.usb_product if adapter else None,
+                "powered": False,
+            })
+        return {
+            "adapters": [row(key, adapter) for key, adapter in self.adapters.items()] + missing_rows,
+            "available_adapters": [
+                row(key, adapter) for key, adapter in self._detected_adapters.items()
+                if key not in self.adapters
+            ],
+            "can_export": bool(self.adapters) and self.export_dir is not None and not missing,
+            "missing_adapters": missing,
+        }
+
     def state(self, *, allow_jog: bool) -> dict[str, Any]:
         return {
-            "adapters": [
-                {
-                    "id": adapter_id,
-                    "usb_path": item.usb_path,
-                    "product": item.usb_product,
-                    "powered": item.powered,
-                }
-                for adapter_id, item in self.adapters.items()
-            ] + [
-                {
-                    "id": adapter_id,
-                    "usb_path": settings.get("usb_path"),
-                    "product": None,
-                    "powered": False,
-                }
-                for adapter_id, settings in self.saved_setup.adapters.items()
-                if adapter_id not in self.adapters
-            ],
+            **self.adapter_state(),
             "devices": [item.browser_dict(self.allow_code_read) for item in self.devices.values()],
             "groups": [{"id": group_id, "name": name}
                        for group_id, name in self.groups.items()],
@@ -441,8 +511,6 @@ class SetupSession:
             "busy": self.ble_lock.locked(),
             "scan": self.scan_state(),
             "allow_code_read": self.allow_code_read,
-            "can_export": bool(self.adapters) and self.export_dir is not None and not self.missing_adapters,
-            "missing_adapters": self.missing_adapters,
             "can_exit_setup": bool(self.saved_setup.adapters),
             "loaded_saved_devices": len(self.saved_setup.devices),
         }
@@ -518,7 +586,7 @@ class SetupSession:
         if self.ble_lock.locked():
             raise ValueError("wait for the active Bluetooth operation to finish")
         if self.missing_adapters:
-            raise ValueError("Restore all configured Bluetooth adapters and reopen setup before saving.")
+            raise ValueError("Restore all configured Bluetooth adapters before saving.")
         if not self.adapters:
             raise ValueError("no powered USB Bluetooth adapters available for saving")
         selected = [item for item in self.devices.values() if item.enabled]
@@ -679,6 +747,16 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
         authorize(_request)
         return web.json_response(session.state(allow_jog=settings.allow_jog))
 
+    async def adapters(request: Any) -> Any:
+        authorize(request)
+        await session.refresh_adapters()
+        return web.json_response(session.adapter_state())
+
+    async def add_adapter(request: Any) -> Any:
+        authorize(request)
+        await session.add_adapter(request.match_info["adapter_id"])
+        return web.json_response(session.adapter_state())
+
     async def start_scan(request: Any) -> Any:
         authorize(request)
         body = await request.json()
@@ -740,6 +818,7 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
 
     async def export(request: Any) -> Any:
         authorize(request)
+        await session.refresh_adapters()
         config_path, secrets_path = session.export()
         return web.json_response({"config": str(config_path), "secrets": str(secrets_path)})
 
@@ -748,6 +827,8 @@ def create_app(session: SetupSession, settings: SetupWebSettings,
     app.router.add_get("/assets/app.css", css)
     app.router.add_get("/assets/setup.js", js)
     app.router.add_get("/api/state", state)
+    app.router.add_get("/api/adapters", adapters)
+    app.router.add_post("/api/adapters/{adapter_id}", add_adapter)
     app.router.add_post("/api/scan", start_scan)
     app.router.add_post("/api/scan/cancel", cancel_scan)
     app.router.add_post("/api/scan/clear", clear_scan)
@@ -782,11 +863,6 @@ def main(argv: list[str] | None = None) -> None:
     token = os.environ.get("GRABER_SETUP_TOKEN")
     if not token or len(token) < 16:
         raise SystemExit("set GRABER_SETUP_TOKEN to at least 16 characters")
-    try:
-        adapters = select_usb_adapters(discover_adapters(), args.controller_address,
-                                       allow_partial=True)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
     networks = tuple(args.allowed_network or (["127.0.0.0/8", "::1/128"] if args.host in {"127.0.0.1", "::1"} else []))
     if not networks:
         raise SystemExit("at least one --allowed-network is required for a non-loopback bind")
@@ -799,13 +875,12 @@ def main(argv: list[str] | None = None) -> None:
         if args.existing_config else None
     )
     group_names = tuple(args.group_name or ())
-    requested = {address.upper() for address in (args.controller_address or ())}
-    missing = requested.difference(adapter.address for adapter in adapters)
     try:
         session = SetupSession(
-            adapters, allow_code_read=args.allow_code_read, export_dir=args.export_dir,
+            discover_adapters(), allow_code_read=args.allow_code_read, export_dir=args.export_dir,
             known_credentials=known_credentials, group_names=group_names,
-            saved_setup=saved_setup, missing_adapters=len(missing),
+            saved_setup=saved_setup, controller_addresses=args.controller_address,
+            adapter_discovery=discover_adapters,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
