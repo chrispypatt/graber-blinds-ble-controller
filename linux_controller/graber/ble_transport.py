@@ -302,10 +302,17 @@ class BleakTransport:
         except (Exception, asyncio.CancelledError) as exc:
             if phases is not None:
                 exc.connection_phase_metrics = phases.metrics()
-            # A BLEDevice contains a BlueZ object path scoped to the adapter.
-            # It must be rediscovered after USB/BlueZ tears that object down.
             if not isinstance(exc, asyncio.CancelledError):
-                self.invalidate_adapter(adapter)
+                if getattr(exc, "dbus_error", None) in {
+                    "org.bluez.Error.NotReady",
+                    "org.freedesktop.DBus.Error.NameHasNoOwner",
+                    "org.freedesktop.DBus.Error.ServiceUnknown",
+                }:
+                    self.invalidate_adapter(adapter)
+                else:
+                    # Losing the target's Device1 object or link says nothing about
+                    # cached objects for other blinds on this adapter.
+                    self._advertisements.pop((adapter, device.address.upper()), None)
             raise
         finally:
             if phases is not None:

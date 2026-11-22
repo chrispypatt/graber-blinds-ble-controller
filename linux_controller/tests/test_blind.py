@@ -258,6 +258,45 @@ def test_warm_connection_reuse_is_measured_without_second_connect():
     asyncio.run(scenario())
 
 
+def test_post_command_battery_reads_once_per_connection_even_after_a_recent_refresh():
+    async def scenario():
+        events = []
+        reads = {
+            BOTTOM_POSITION_CHARACTERISTIC: bytes([42]),
+            BATTERY_CHARACTERISTIC: bytes([88]),
+        }
+        blind = make_controller(
+            FakeConnection(reads=reads),
+            telemetry=lambda event, fields: events.append((event, fields)),
+        )
+        try:
+            assert (await blind.refresh_status()).battery == 88
+            blind._transport.connection = FakeConnection(
+                reads={**reads, BATTERY_CHARACTERISTIC: bytes([89])},
+            )
+            for command_id in ("open", "warm"):
+                result = await blind.execute(
+                    BlindCommand(command_id, CommandKind.SET_POSITION, Rail.BOTTOM, 42)
+                )
+                assert result.outcome is Outcome.COMPLETED
+            assert blind.state.battery == 89
+            assert blind._transport.connect_calls == 2
+            battery_reads = [
+                (fields["source"], fields.get("command_id"), fields["value"])
+                for event, fields in events if event == "battery_read"
+            ]
+            assert battery_reads == [("status_refresh", None, 88), ("post_command", "open", 89)]
+            completed_index = next(i for i, (event, _) in enumerate(events) if event == "command_completed")
+            post_command_index = next(
+                i for i, (event, fields) in enumerate(events)
+                if event == "battery_read" and fields["source"] == "post_command"
+            )
+            assert completed_index < post_command_index
+        finally:
+            await blind.close()
+    asyncio.run(scenario())
+
+
 def test_disconnect_cleanup_error_does_not_mask_completed_command():
     async def scenario():
         connection = FakeConnection(disconnect_error=EOFError())
@@ -282,6 +321,48 @@ def test_final_ack_without_feedback_is_not_replayed():
         ]
         assert result.attempts == 1
         await blind.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("quiet_interval,direct_top,expected", [
+    (0.01, 100, Outcome.COMPLETED),
+    (0.01, 99, Outcome.COMPLETION_UNCONFIRMED),
+    (1.0, 100, Outcome.COMPLETED),
+])
+def test_full_open_rechecks_both_rails_after_intermediate_feedback(
+    monkeypatch, quiet_interval, direct_top, expected,
+):
+    monkeypatch.setattr("graber.blind.ENDPOINT_RECHECK_INTERVAL_S", quiet_interval)
+
+    class MissingEndpointNotification(FakeConnection):
+        async def write(self, characteristic, value):
+            await super().write(characteristic, value)
+            if len(self.writes) == 2:
+                self.notifications[BOTTOM_POSITION_CHARACTERISTIC](bytes([80]))
+                self.notifications[TOP_POSITION_CHARACTERISTIC](bytes([100]))
+
+    async def scenario():
+        events = []
+        connection = MissingEndpointNotification(reads={
+            BOTTOM_POSITION_CHARACTERISTIC: bytes([100]),
+            TOP_POSITION_CHARACTERISTIC: bytes([direct_top]),
+            BATTERY_CHARACTERISTIC: bytes([88]),
+        })
+        blind = make_controller(
+            connection, dual=True, feedback_timeout=0.08,
+            telemetry=lambda event, fields: events.append((event, fields)),
+        )
+        try:
+            result = await blind.execute(BlindCommand("open", CommandKind.FULL_OPEN))
+            assert result.outcome is expected
+            assert result.attempts == 1
+            event_name = "endpoint_verified_by_read" if expected is Outcome.COMPLETED else "feedback_timed_out"
+            event = next(fields for name, fields in events if name == event_name)
+            assert (event["bottom_raw"], event["top_raw"]) == (100, direct_top)
+            if expected is Outcome.COMPLETION_UNCONFIRMED:
+                assert event["endpoint_read_top_raw"] == direct_top
+        finally:
+            await blind.close()
     asyncio.run(scenario())
 
 

@@ -18,6 +18,8 @@ from .protocol import (
     build_command, parse_manufacturer_data, position_from_notification,
 )
 
+ENDPOINT_RECHECK_INTERVAL_S = 3.0
+
 
 class Outcome(str, Enum):
     RECEIVED = "received"
@@ -95,6 +97,7 @@ class _Session:
     last_used: float
     connected_at: float = field(default_factory=time.monotonic)
     command_count: int = 0
+    battery_read_attempted: bool = False
     close_task: asyncio.Task[None] | None = None
 
 
@@ -119,7 +122,6 @@ class BlindController:
         }
         self._sample_event = asyncio.Event()
         self._last_change = time.monotonic()
-        self._last_battery_read = 0.0
         self._closed = False
 
     def _emit(self, event: str, **fields: object) -> None:
@@ -265,7 +267,7 @@ class BlindController:
                         movement_observed=result.movement_observed,
                     )
                     self._emit("command_completed", **self._result_fields(result))
-                    await self._maybe_read_battery(session.connection)
+                    await self._maybe_read_battery(session, command.id)
                     self._schedule_close(session)
                     return result
                 except CompletionUnconfirmed as exc:
@@ -397,7 +399,7 @@ class BlindController:
                         )
                         self.state.battery = battery_from_read(raw)
                         battery_read_ms = (time.monotonic() - battery_started) * 1000
-                        self._last_battery_read = time.time()
+                        session.battery_read_attempted = True
                         self._state_listener(self.config.id, self.state)
                         self._emit(
                             "battery_read", value=self.state.battery,
@@ -563,10 +565,20 @@ class BlindController:
                     "preset write acknowledged; completion target is unknown for this index"
                 )
             required = [Rail.BOTTOM, Rail.TOP]
-        deadline = time.monotonic() + self._retry.feedback_timeout_s
+        endpoint_target: dict[Rail, int] = {}
+        if command.kind in {CommandKind.FULL_OPEN, CommandKind.FULL_CLOSE}:
+            endpoint_target[Rail.BOTTOM] = 100 if command.kind is CommandKind.FULL_OPEN else 0
+            if self.config.dual_rail:
+                endpoint_target[Rail.TOP] = 100
         movement = False
         movement_start_ms: float | None = None
         feedback_started = time.monotonic()
+        deadline = feedback_started + self._retry.feedback_timeout_s
+        final_recheck_at = deadline - min(
+            self._retry.gatt_timeout_s * len(endpoint_target), self._retry.feedback_timeout_s / 3,
+        )
+        last_endpoint_recheck = feedback_started
+        endpoint_read: dict[Rail, int] = {}
         feedback_first_sample_ms: float | None = None
         initial = {Rail.BOTTOM: self.state.bottom, Rail.TOP: self.state.top}
         while time.monotonic() < deadline:
@@ -595,10 +607,8 @@ class BlindController:
             if command.kind is CommandKind.SET_POSITION and command.rail is not None:
                 value = current[command.rail]
                 target_ok = value is not None and command.position is not None and abs(value - command.position) <= 1
-            elif command.kind is CommandKind.FULL_OPEN:
-                target_ok = current[Rail.BOTTOM] == 100 and (not self.config.dual_rail or current[Rail.TOP] == 100)
-            elif command.kind is CommandKind.FULL_CLOSE:
-                target_ok = current[Rail.BOTTOM] == 0 and (not self.config.dual_rail or current[Rail.TOP] == 100)
+            elif endpoint_target:
+                target_ok = all(current[rail] == target for rail, target in endpoint_target.items())
             elif command.kind in {CommandKind.STOP, CommandKind.FAVORITE}:
                 target_ok = time.monotonic() - self._last_change >= 2.0
                 if command.kind is CommandKind.FAVORITE:
@@ -608,26 +618,55 @@ class BlindController:
             elif command.kind in {CommandKind.STACK_UP, CommandKind.STACK_DOWN}:
                 target_ok = time.monotonic() - self._last_change >= 0.6
             if fresh and target_ok:
+                if endpoint_target and endpoint_read == endpoint_target:
+                    self._emit("endpoint_verified_by_read", command_id=command.id,
+                               bottom_raw=endpoint_read.get(Rail.BOTTOM), top_raw=endpoint_read.get(Rail.TOP))
                 return movement, movement_start_ms, feedback_first_sample_ms
-            # Quiet notification streams get bounded explicit reads.
+            # Even fresh feedback can miss the endpoint. Check the actual rails
+            # after a pause in reported progress, including repeated identical samples.
+            now = time.monotonic()
+            endpoint_recheck_at = max(self._last_change, last_endpoint_recheck) + ENDPOINT_RECHECK_INTERVAL_S
+            # Reserve one last check even if conflicting reports look like progress.
+            if last_endpoint_recheck < final_recheck_at:
+                endpoint_recheck_at = min(endpoint_recheck_at, final_recheck_at)
+            recheck_endpoint = bool(endpoint_target) and fresh and now >= endpoint_recheck_at
+            if recheck_endpoint:
+                endpoint_read = {}
             read_updated = False
             for rail in required:
-                if rail is None or self._sample_counts[rail] > baseline[rail]:
+                if rail is None or (not recheck_endpoint and self._sample_counts[rail] > baseline[rail]):
                     continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
                 characteristic = BOTTOM_POSITION_CHARACTERISTIC if rail is Rail.BOTTOM else TOP_POSITION_CHARACTERISTIC
                 try:
-                    value = await asyncio.wait_for(connection.read(characteristic), self._retry.gatt_timeout_s)
-                    self._update_position(rail, position_from_notification(value))
+                    value = await asyncio.wait_for(connection.read(characteristic),
+                                                   min(self._retry.gatt_timeout_s, remaining))
+                    position = position_from_notification(value)
+                    if recheck_endpoint:
+                        endpoint_read[rail] = position
+                        continue
+                    self._update_position(rail, position)
                     read_updated = True
                 except Exception:
                     pass
+            if recheck_endpoint:
+                last_endpoint_recheck = time.monotonic()
+                if endpoint_read.keys() == endpoint_target.keys():
+                    for rail, position in endpoint_read.items():
+                        self._update_position(rail, position)
+                    read_updated = True
             if read_updated:
                 # Re-evaluate immediately; do not spend the remaining timeout
                 # waiting for a notification after a successful explicit read.
                 continue
             self._sample_event.clear()
+            wait_s = min(1.2, deadline - time.monotonic())
+            if endpoint_target and fresh and not recheck_endpoint:
+                wait_s = min(wait_s, endpoint_recheck_at - time.monotonic())
             try:
-                await asyncio.wait_for(self._sample_event.wait(), min(1.2, max(0.01, deadline - time.monotonic())))
+                await asyncio.wait_for(self._sample_event.wait(), max(0.001, wait_s))
             except TimeoutError:
                 pass
         self._emit(
@@ -635,6 +674,9 @@ class BlindController:
             feedback_ms=(time.monotonic() - feedback_started) * 1000,
             feedback_first_sample_ms=feedback_first_sample_ms,
             movement_observed=movement,
+            bottom_raw=self.state.bottom, top_raw=self.state.top,
+            endpoint_read_bottom_raw=endpoint_read.get(Rail.BOTTOM),
+            endpoint_read_top_raw=endpoint_read.get(Rail.TOP),
         )
         raise CompletionUnconfirmed("GATT writes acknowledged but fresh completion feedback timed out")
 
@@ -647,6 +689,7 @@ class BlindController:
             raw = await asyncio.wait_for(self._session.connection.read(BATTERY_CHARACTERISTIC),
                                          self._retry.gatt_timeout_s)
             value = battery_from_read(raw)
+            self._session.battery_read_attempted = True
             self.state.battery = value
             self._state_listener(self.config.id, self.state)
             self._emit(
@@ -655,27 +698,26 @@ class BlindController:
             )
             return value
 
-    async def _maybe_read_battery(self, connection: BleConnection) -> None:
-        now = time.time()
-        if now - self._last_battery_read < self.config.battery_interval_s:
+    async def _maybe_read_battery(self, session: _Session, command_id: str) -> None:
+        if session.battery_read_attempted:
             return
         # Battery work is low priority and occurs only on an already-open link.
         # A failure never changes an otherwise completed movement result.
-        self._last_battery_read = now
+        session.battery_read_attempted = True
         try:
             started = time.monotonic()
-            raw = await asyncio.wait_for(connection.read(BATTERY_CHARACTERISTIC),
+            raw = await asyncio.wait_for(session.connection.read(BATTERY_CHARACTERISTIC),
                                          self._retry.gatt_timeout_s)
             self.state.battery = battery_from_read(raw)
             self._state_listener(self.config.id, self.state)
             self._emit(
                 "battery_read", value=self.state.battery,
-                source="post_command",
+                source="post_command", command_id=command_id,
                 battery_read_ms=(time.monotonic() - started) * 1000,
             )
         except Exception as exc:
             self._emit(
-                "battery_read_failed", source="post_command",
+                "battery_read_failed", source="post_command", command_id=command_id,
                 error_category=self._error_category(exc),
                 error=f"{type(exc).__name__}: {exc}",
             )

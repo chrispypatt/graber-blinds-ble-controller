@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 import graber.ble_transport as ble_transport
 from graber.ble_transport import BleakConnection, BleakTransport
 
@@ -104,27 +106,43 @@ def test_discover_waits_for_active_monitor_instead_of_starting_another_scan():
     asyncio.run(scenario())
 
 
-def test_connect_failure_discards_stale_device_for_reconnect_scan():
+@pytest.mark.parametrize(
+    ("dbus_error", "peer_retained"),
+    [
+        ("org.freedesktop.DBus.Error.UnknownObject", True),
+        ("org.bluez.Error.Failed", True),
+        ("org.bluez.Error.NotReady", False),
+    ],
+)
+def test_connect_failure_discards_only_affected_advertisements(dbus_error, peer_retained):
+    class ConnectError(RuntimeError):
+        pass
+
     class FailingClient:
         def __init__(self, _device, **_kwargs):
             pass
 
         async def connect(self):
-            raise RuntimeError("org.freedesktop.DBus.Error.UnknownObject")
+            error = ConnectError(dbus_error)
+            error.dbus_error = dbus_error
+            raise error
 
     async def scenario():
         transport = make_transport()
         transport._client_type = FailingClient
         discovered = transport._discovered(FakeDevice(), FakeAdvertisement())
+        peer = transport._discovered(FakeDevice("AA:BB:CC:DD:EE:FF"), FakeAdvertisement())
         transport._remember("hci9", discovered)
-        assert transport._advertisements
-        try:
+        transport._remember("hci9", peer)
+        transport._remember("hci8", discovered)
+        with pytest.raises(ConnectError):
             await transport.connect(discovered, "hci9", 0.1)
-        except RuntimeError:
-            pass
+        assert ("hci9", discovered.address) not in transport._advertisements
+        assert await transport.discover(discovered.address, "hci8", 0.1) is discovered
+        if peer_retained:
+            assert await transport.discover(peer.address, "hci9", 0.1) is peer
         else:
-            raise AssertionError("connect should fail")
-        assert transport._advertisements == {}
+            assert ("hci9", peer.address) not in transport._advertisements
 
     asyncio.run(scenario())
 
