@@ -13,6 +13,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install controller and test dependencies
-        run: pip install --require-hashes --only-binary=:all: -r linux_controller/requirements-dev.lock
+        run: >-
+          pip install --require-hashes --only-binary=:all: -r linux_controller/requirements-dev.lock
       - name: Run Phase A tests and static checks
         run: make check
