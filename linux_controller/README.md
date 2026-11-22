@@ -14,7 +14,7 @@ Run offline tests from the repository root:
 ```sh
 python3 -m venv .venv-linux
 . .venv-linux/bin/activate
-pip install -r linux_controller/requirements-dev.txt
+pip install --require-hashes --only-binary=:all: -r linux_controller/requirements-dev.lock
 pytest linux_controller/tests
 ```
 

@@ -35,11 +35,18 @@ The defaults are:
 - App: `/opt/graber-controller`
 - Private configuration: `/etc/graber-controller`
 - Runtime state: `/var/lib/graber-controller`
-- Web app: `http://PI_ADDRESS:8080` before optional HTTPS setup
+- Web app: `127.0.0.1:8080` only, for access through a trusted HTTPS proxy
 
 Set `GRABER_INSTALL_DIR`, `GRABER_CONFIG_DIR`, `GRABER_STATE_DIR`,
 `GRABER_SERVICE_NAME`, `GRABER_PORTAL_HOST`, `GRABER_PORTAL_PORT`, or
 `GRABER_ALLOWED_NETWORKS` before both installer commands to override them.
+The default portal uses Secure cookies and does not listen on the LAN. Configure
+the HTTPS proxy below before opening setup from another device. Direct LAN HTTP
+requires a non-loopback `GRABER_PORTAL_HOST`,
+`GRABER_PORTAL_ALLOW_LAN_HTTP=true`, and
+`GRABER_PORTAL_SECURE_COOKIE=false` so login works over HTTP. It exposes login
+credentials on the LAN and is intended only for a temporary supervised setup.
+Restore the Secure cookie setting before returning to HTTPS.
 
 The installer creates the unprivileged `graber` service account, a hashed
 recovery administrator, host settings, and the systemd service. Existing private
@@ -54,7 +61,7 @@ The existing private setup key is the permanent `admin` recovery password:
 sudo cat /var/lib/graber-controller/setup-token
 ```
 
-Open `http://PI_ADDRESS:8080` from the trusted local network, sign in as `admin`,
+Open the configured HTTPS proxy URL from the trusted local network, sign in as `admin`,
 and enter that recovery password. The first login requires a separate everyday
 account with a username and password you choose. Sign in with that account for
 normal setup and control. Reserve `admin` for account recovery. Do not
@@ -172,11 +179,10 @@ the installer does not install Caddy, change DNS, or modify network settings.
 See Caddy's [local HTTPS documentation](https://caddyserver.com/docs/automatic-https#local-https)
 for its internal certificate authority and client trust model.
 
-For a new install, set these variables before running the installer:
+The installer already defaults to a loopback portal with Secure cookies. If
+Caddy runs on the same host, set the trusted proxy before running the installer:
 
 ```sh
-export GRABER_PORTAL_HOST=127.0.0.1
-export GRABER_PORTAL_SECURE_COOKIE=true
 export GRABER_PORTAL_TRUSTED_PROXIES=127.0.0.0/8,::1/128
 sudo -E ./deploy/install.sh --apply
 ```
@@ -236,7 +242,9 @@ sudo ./deploy/install.sh --apply
 sudo systemctl restart graber-controller
 ```
 
-The installer preserves private configuration and portal authentication.
+The installer preserves private configuration and portal authentication. It
+installs application dependencies from the pinned, hash-verified
+`linux_controller/requirements-rpi5.lock`.
 
 To roll back, stop and disable the service, confirm no BLE sessions remain,
 then re-enable the previous automation path:

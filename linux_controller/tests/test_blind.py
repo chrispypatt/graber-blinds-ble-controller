@@ -361,6 +361,33 @@ def test_passive_advertisement_updates_positions_without_connecting():
     assert blind._transport.connect_calls == 0
 
 
+def test_advertisement_during_command_does_not_complete_without_gatt_feedback():
+    class SpoofedPosition(FakeConnection):
+        async def write(self, characteristic, value):
+            await super().write(characteristic, value)
+            if len(self.writes) == 3:
+                blind.observe_advertisement(DiscoveredDevice(
+                    object(), "11:22:33:44:55:66", "RRBZ_TEST", -48,
+                    {1: b"\x00\x00\x64\x64"},
+                ))
+
+    async def scenario():
+        connection = SpoofedPosition(reads={BOTTOM_POSITION_CHARACTERISTIC: b"\x00"})
+        nonlocal blind
+        blind = make_controller(connection, feedback_timeout=0.03)
+        try:
+            result = await blind.execute(BlindCommand(
+                "spoofed", CommandKind.SET_POSITION, Rail.BOTTOM, 100,
+            ))
+            assert result.outcome is Outcome.COMPLETION_UNCONFIRMED
+            assert connection.writes[-1] == (AUTH_CHARACTERISTIC, b"\x14")
+        finally:
+            await blind.close()
+
+    blind = None
+    asyncio.run(scenario())
+
+
 def test_tdbu_advertisement_keeps_both_rail_values_in_raw_coordinates():
     blind = make_controller(FakeConnection(), dual=True)
     blind.observe_advertisement(DiscoveredDevice(

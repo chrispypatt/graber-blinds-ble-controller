@@ -112,6 +112,11 @@ class BlindController:
         self._lock = asyncio.Lock()
         self._session: _Session | None = None
         self._sample_counts = {Rail.BOTTOM: 0, Rail.TOP: 0}
+        # Advertisements keep unsolicited movement visible, but only feedback
+        # from the authenticated GATT connection can complete our commands.
+        self._feedback_positions: dict[Rail, int | None] = {
+            Rail.BOTTOM: None, Rail.TOP: None,
+        }
         self._sample_event = asyncio.Event()
         self._last_change = time.monotonic()
         self._last_battery_read = 0.0
@@ -154,9 +159,9 @@ class BlindController:
         parsed = parse_manufacturer_data(device.manufacturer_data, tdbu=self.config.dual_rail)
         self.state.rssi = device.rssi
         if parsed:
-            self._update_position(Rail.BOTTOM, parsed.bottom)
+            self._update_position(Rail.BOTTOM, parsed.bottom, verified=False)
             if parsed.top is not None:
-                self._update_position(Rail.TOP, parsed.top)
+                self._update_position(Rail.TOP, parsed.top, verified=False)
 
     def _notification(self, rail: Rail) -> Callable[[bytes], None]:
         def callback(value: bytes) -> None:
@@ -166,7 +171,7 @@ class BlindController:
                 self._emit("invalid_notification", rail=rail.value, error=str(exc))
         return callback
 
-    def _update_position(self, rail: Rail, value: int) -> None:
+    def _update_position(self, rail: Rail, value: int, *, verified: bool = True) -> None:
         previous = self.state.bottom if rail is Rail.BOTTOM else self.state.top
         if previous is not None and previous != value:
             self._last_change = time.monotonic()
@@ -175,8 +180,10 @@ class BlindController:
         else:
             self.state.top = value
         self.state.updated_at = time.time()
-        self._sample_counts[rail] += 1
-        self._sample_event.set()
+        if verified:
+            self._feedback_positions[rail] = value
+            self._sample_counts[rail] += 1
+            self._sample_event.set()
         self._state_listener(self.config.id, self.state)
 
     async def execute(self, command: BlindCommand) -> CommandResult:
@@ -570,8 +577,15 @@ class BlindController:
                     "feedback_observed", command_id=command.id,
                     feedback_first_sample_ms=feedback_first_sample_ms,
                 )
-            current = {Rail.BOTTOM: self.state.bottom, Rail.TOP: self.state.top}
-            changed = any(initial[rail] is not None and current[rail] != initial[rail] for rail in required if rail)
+            current = dict(self._feedback_positions)
+            verified_progress = any(
+                self._sample_counts[rail] > baseline[rail]
+                for rail in required if rail is not None
+            )
+            changed = verified_progress and any(
+                initial[rail] is not None and current[rail] != initial[rail]
+                for rail in required if rail is not None
+            )
             if changed and not movement:
                 movement_start_ms = (time.time() - command.received_at) * 1000
                 self._emit("movement_observed", command_id=command.id,

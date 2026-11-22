@@ -11,6 +11,7 @@ usage() {
   echo "  web bind may be overridden with GRABER_PORTAL_HOST," >&2
   echo "  GRABER_PORTAL_PORT, GRABER_PORTAL_SECURE_COOKIE," >&2
   echo "  GRABER_PORTAL_TRUSTED_PROXIES, and GRABER_ALLOWED_NETWORKS" >&2
+  echo "  non-loopback HTTP requires GRABER_PORTAL_ALLOW_LAN_HTTP=true" >&2
 }
 
 apply=false
@@ -36,11 +37,12 @@ config_dir=${GRABER_CONFIG_DIR:-/etc/graber-controller}
 state_dir=${GRABER_STATE_DIR:-/var/lib/graber-controller}
 service_name=${GRABER_SERVICE_NAME:-graber-controller}
 service_file=/etc/systemd/system/$service_name.service
-portal_host=${GRABER_PORTAL_HOST:-0.0.0.0}
+portal_host=${GRABER_PORTAL_HOST:-127.0.0.1}
 portal_port=${GRABER_PORTAL_PORT:-8080}
-portal_secure_cookie=${GRABER_PORTAL_SECURE_COOKIE:-false}
+portal_secure_cookie=${GRABER_PORTAL_SECURE_COOKIE:-true}
 portal_trusted_proxies=${GRABER_PORTAL_TRUSTED_PROXIES:-}
-portal_allowed_networks=${GRABER_ALLOWED_NETWORKS:-127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}
+portal_allowed_networks=${GRABER_ALLOWED_NETWORKS:-127.0.0.0/8,::1/128}
+portal_allow_lan_http=${GRABER_PORTAL_ALLOW_LAN_HTTP:-false}
 
 for target in "$install_dir" "$config_dir" "$state_dir"; do
   case "$target" in
@@ -70,6 +72,19 @@ fi
 case "$portal_secure_cookie" in
   true|false) ;;
   *) echo "GRABER_PORTAL_SECURE_COOKIE must be true or false" >&2; exit 2 ;;
+esac
+case "$portal_allow_lan_http" in
+  true|false) ;;
+  *) echo "GRABER_PORTAL_ALLOW_LAN_HTTP must be true or false" >&2; exit 2 ;;
+esac
+case "$portal_host" in
+  127.0.0.1|localhost|::1) ;;
+  *)
+    if [ "$portal_allow_lan_http" != true ]; then
+      echo "non-loopback HTTP requires GRABER_PORTAL_ALLOW_LAN_HTTP=true" >&2
+      exit 2
+    fi
+    ;;
 esac
 case "$portal_allowed_networks" in
   *[!A-Fa-f0-9:.,/-]*|'') echo "invalid GRABER_ALLOWED_NETWORKS" >&2; exit 2 ;;
@@ -132,7 +147,8 @@ install -o root -g root -m 0755 "$script_dir/run-portal.sh" \
 if [ ! -d "$install_dir/.venv" ]; then
   python3 -m venv "$install_dir/.venv"
 fi
-"$install_dir/.venv/bin/python" -m pip install -r "$repo_dir/linux_controller/requirements.txt"
+"$install_dir/.venv/bin/python" -m pip install --require-hashes --only-binary=:all: \
+  -r "$repo_dir/linux_controller/requirements-rpi5.lock"
 
 if [ -f "$repo_dir/linux_controller/config.example.toml" ]; then
   install -o root -g graber -m 0640 "$repo_dir/linux_controller/config.example.toml" \

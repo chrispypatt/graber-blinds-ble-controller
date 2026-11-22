@@ -1,20 +1,165 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#17211c"><title>My shades · Graber Control</title><link rel="stylesheet" href="/assets/app.css">
-</head>
-<body class="control-page">
-  <div class="app-shell">
-    <header class="topbar"><a class="brand" href="/" aria-label="Graber Control home"><span><strong>Graber Control</strong><small>Home dashboard</small></span></a><div class="topbar-actions"><span class="status-pill" id="controllerStatus"><i></i>Connecting</span><button class="button ghost compact" id="setupButton" type="button">Edit setup</button><button class="button ghost compact" id="accountButton" type="button">Account</button></div></header>
-    <main class="page-wrap">
-      <section class="hero control-hero"><div><h1>Shades</h1><p class="hero-copy" id="dashboardSummary">Loading…</p></div></section>
-      <div class="notice is-hidden" id="controlNotice"><span>ⓘ</span><div><strong>Controls disabled</strong></div></div>
-      <section class="content-section" id="groupSection"><div class="section-heading"><h2>Groups</h2></div><div class="group-grid" id="groupGrid"></div></section>
-      <section class="content-section"><div class="section-heading split"><div><h2>All shades</h2></div><label class="search"><span aria-hidden="true">⌕</span><input id="blindSearch" type="search" placeholder="Search shades" aria-label="Search shades"></label></div><div class="blind-grid" id="blindGrid" aria-live="polite"></div></section>
-      <section class="content-section diagnostics-section"><details><summary><span><span class="stat-icon radio">◉</span><span><strong>Bluetooth system</strong><small id="adapterSummary">Checking adapters…</small></span></span><span>View diagnostics</span></summary><div class="adapter-grid" id="adapterGrid"></div></details></section>
-    </main>
-  </div>
-  <div class="modal-backdrop is-hidden" id="accountModal" role="dialog" aria-modal="true" aria-labelledby="accountTitle"><section class="modal-card narrow"><button class="icon-button modal-close" data-close-modal aria-label="Close">×</button><h2 id="accountTitle">Account</h2><p id="accountName"></p><form id="passwordForm"><label class="field"><span>Current password</span><input id="currentPassword" type="password" autocomplete="current-password" required></label><label class="field"><span>New password</span><input id="newPassword" type="password" autocomplete="new-password" minlength="12" required></label><label class="field"><span>Confirm password</span><input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" required></label><p class="form-error" id="passwordError" role="alert"></p><div class="modal-actions"><button class="button primary" type="submit">Change password</button></div></form><form class="is-hidden" id="ownerAccountForm"><label class="field"><span>Owner username</span><input id="ownerUsername" autocomplete="username" required></label><label class="field"><span>Owner password</span><input id="ownerPassword" type="password" autocomplete="new-password" minlength="12" required></label><label class="field"><span>Confirm password</span><input id="ownerPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label><p class="form-error" id="ownerAccountError" role="alert"></p><div class="modal-actions"><button class="button primary" type="submit">Save owner</button></div></form><div class="account-footer"><button class="button danger" id="logoutButton" type="button">Sign out</button></div></section></div>
-  <div class="toast-region" id="toasts" aria-live="polite"></div><script src="/assets/control.js" defer></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#17211c" />
+    <title>My shades · Graber Control</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body class="control-page">
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Graber Control home"
+          ><span
+            ><strong>Graber Control</strong><small>Home dashboard</small></span
+          ></a
+        >
+        <div class="topbar-actions">
+          <span class="status-pill" id="controllerStatus"
+            ><i></i>Connecting</span
+          ><button class="button ghost compact" id="setupButton" type="button">
+            Edit setup</button
+          ><button
+            class="button ghost compact"
+            id="accountButton"
+            type="button"
+          >
+            Account
+          </button>
+        </div>
+      </header>
+      <main class="page-wrap">
+        <section class="hero control-hero">
+          <div>
+            <h1>Shades</h1>
+            <p class="hero-copy" id="dashboardSummary">Loading…</p>
+          </div>
+        </section>
+        <div class="notice is-hidden" id="controlNotice">
+          <span>ⓘ</span>
+          <div><strong>Controls disabled</strong></div>
+        </div>
+        <section class="content-section" id="groupSection">
+          <div class="section-heading"><h2>Groups</h2></div>
+          <div class="group-grid" id="groupGrid"></div>
+        </section>
+        <section class="content-section">
+          <div class="section-heading split">
+            <div><h2>All shades</h2></div>
+            <label class="search"
+              ><span aria-hidden="true">⌕</span
+              ><input
+                id="blindSearch"
+                type="search"
+                placeholder="Search shades"
+                aria-label="Search shades"
+            /></label>
+          </div>
+          <div class="blind-grid" id="blindGrid" aria-live="polite"></div>
+        </section>
+        <section class="content-section diagnostics-section">
+          <details>
+            <summary>
+              <span
+                ><span class="stat-icon radio">◉</span
+                ><span
+                  ><strong>Bluetooth system</strong
+                  ><small id="adapterSummary">Checking adapters…</small></span
+                ></span
+              ><span>View diagnostics</span>
+            </summary>
+            <div class="adapter-grid" id="adapterGrid"></div>
+          </details>
+        </section>
+      </main>
+    </div>
+    <div
+      class="modal-backdrop is-hidden"
+      id="accountModal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="accountTitle"
+    >
+      <section class="modal-card narrow">
+        <button
+          class="icon-button modal-close"
+          data-close-modal
+          aria-label="Close"
+        >
+          ×
+        </button>
+        <h2 id="accountTitle">Account</h2>
+        <p id="accountName"></p>
+        <form id="passwordForm">
+          <label class="field"
+            ><span>Current password</span
+            ><input
+              id="currentPassword"
+              type="password"
+              autocomplete="current-password"
+              required /></label
+          ><label class="field"
+            ><span>New password</span
+            ><input
+              id="newPassword"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              required /></label
+          ><label class="field"
+            ><span>Confirm password</span
+            ><input
+              id="confirmPassword"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              required
+          /></label>
+          <p class="form-error" id="passwordError" role="alert"></p>
+          <div class="modal-actions">
+            <button class="button primary" type="submit">
+              Change password
+            </button>
+          </div>
+        </form>
+        <form class="is-hidden" id="ownerAccountForm">
+          <label class="field"
+            ><span>Owner username</span
+            ><input
+              id="ownerUsername"
+              autocomplete="username"
+              required /></label
+          ><label class="field"
+            ><span>Owner password</span
+            ><input
+              id="ownerPassword"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              required /></label
+          ><label class="field"
+            ><span>Confirm password</span
+            ><input
+              id="ownerPasswordConfirm"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              required
+          /></label>
+          <p class="form-error" id="ownerAccountError" role="alert"></p>
+          <div class="modal-actions">
+            <button class="button primary" type="submit">Save owner</button>
+          </div>
+        </form>
+        <div class="account-footer">
+          <button class="button danger" id="logoutButton" type="button">
+            Sign out
+          </button>
+        </div>
+      </section>
+    </div>
+    <div class="toast-region" id="toasts" aria-live="polite"></div>
+    <script src="/assets/control.js" defer></script>
+  </body>
 </html>

@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 PACKAGE = Path(__file__).parents[1] / "graber"
@@ -54,11 +55,11 @@ def test_recovery_role_creates_or_resets_owner_without_changing_admin_password()
     control = (PACKAGE / "static" / "control.js").read_text(encoding="utf-8")
     setup = (PACKAGE / "static" / "setup.js").read_text(encoding="utf-8")
 
-    assert "body.role==='recovery'&&body.setup_required" in auth
+    assert re.search(r'body\.role\s*===\s*[\'"]recovery[\'"]\s*&&\s*body\.setup_required', auth)
     assert "Create your account" in (
         PACKAGE / "templates" / "auth.html"
     ).read_text(encoding="utf-8")
     for source in (control, setup):
-        assert "authSession.role==='recovery'" in source
+        assert re.search(r'authSession\.role\s*===\s*[\'"]recovery[\'"]', source)
         assert "ownerAccountForm" in source
         assert "current_password" in source

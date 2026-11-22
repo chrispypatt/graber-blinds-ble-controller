@@ -1,30 +1,73 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#17211c">
-  <title>Sign in · Graber Control</title>
-  <link rel="stylesheet" href="/assets/app.css">
-</head>
-<body>
-  <main class="auth-screen">
-    <form class="auth-card" id="loginForm">
-      <h1>Graber Control</h1>
-      <label class="field"><span>Username</span><input id="username" name="username" autocomplete="username" autofocus required></label>
-      <label class="field"><span>Password</span><input id="password" name="password" type="password" autocomplete="current-password" required></label>
-      <p class="form-error" id="loginError" role="alert"></p>
-      <button class="button primary wide" id="loginButton" type="submit">Sign in</button>
-    </form>
-    <form class="auth-card is-hidden" id="accountSetupForm">
-      <h1>Create your account</h1>
-      <label class="field"><span>Username</span><input id="accountUsername" autocomplete="username" required></label>
-      <label class="field"><span>Password</span><input id="accountPassword" type="password" autocomplete="new-password" minlength="12" required></label>
-      <label class="field"><span>Confirm password</span><input id="accountPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
-      <p class="form-error" id="accountSetupError" role="alert"></p>
-      <button class="button primary wide" id="accountSetupButton" type="submit">Create account</button>
-    </form>
-  </main>
-  <script src="/assets/auth.js" defer></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#17211c" />
+    <title>Sign in · Graber Control</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <main class="auth-screen">
+      <form class="auth-card" id="loginForm">
+        <h1>Graber Control</h1>
+        <label class="field"
+          ><span>Username</span
+          ><input
+            id="username"
+            name="username"
+            autocomplete="username"
+            autofocus
+            required
+        /></label>
+        <label class="field"
+          ><span>Password</span
+          ><input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+        /></label>
+        <p class="form-error" id="loginError" role="alert"></p>
+        <button class="button primary wide" id="loginButton" type="submit">
+          Sign in
+        </button>
+      </form>
+      <form class="auth-card is-hidden" id="accountSetupForm">
+        <h1>Create your account</h1>
+        <label class="field"
+          ><span>Username</span
+          ><input id="accountUsername" autocomplete="username" required
+        /></label>
+        <label class="field"
+          ><span>Password</span
+          ><input
+            id="accountPassword"
+            type="password"
+            autocomplete="new-password"
+            minlength="12"
+            required
+        /></label>
+        <label class="field"
+          ><span>Confirm password</span
+          ><input
+            id="accountPasswordConfirm"
+            type="password"
+            autocomplete="new-password"
+            minlength="12"
+            required
+        /></label>
+        <p class="form-error" id="accountSetupError" role="alert"></p>
+        <button
+          class="button primary wide"
+          id="accountSetupButton"
+          type="submit"
+        >
+          Create account
+        </button>
+      </form>
+    </main>
+    <script src="/assets/auth.js" defer></script>
+  </body>
 </html>
