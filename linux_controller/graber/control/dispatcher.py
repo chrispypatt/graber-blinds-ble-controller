@@ -9,8 +9,9 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import Callable
 
-from .blind import BlindCommand, BlindController, CommandResult, Outcome
-from .protocol import CommandKind
+from .blind import BlindController
+from .commands import BlindCommand, CommandResult, Outcome
+from graber.bluetooth.protocol import CommandKind
 
 
 class QueueFull(RuntimeError):

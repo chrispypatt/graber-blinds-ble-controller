@@ -1,12 +1,17 @@
 # Replace this hostname with a private DNS name that resolves to the Pi.
 graber.home.arpa {
+	# Issue the site's certificate with Caddy's local CA. Clients must trust its root.
 	tls internal
+	# Match direct peers outside Caddy's private IP ranges and close their connections.
 	@outsideLan not remote_ip private_ranges
 	abort @outsideLan
+	# Forward accepted HTTPS requests to the portal's HTTP listener on this Pi.
 	reverse_proxy 127.0.0.1:8080
 
 	header {
+		# Tell browsers to respect the declared content type for scripts and styles.
 		X-Content-Type-Options nosniff
+		# Omit the referring page's URL from requests made by the browser.
 		Referrer-Policy no-referrer
 	}
 }

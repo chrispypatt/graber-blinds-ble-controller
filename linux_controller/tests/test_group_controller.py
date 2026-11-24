@@ -2,11 +2,11 @@ import asyncio
 
 import pytest
 
-from graber.blind import CommandResult, Outcome
+from graber.control.blind import CommandResult, Outcome
 from graber.config import GroupConfig
-from graber.dispatcher import BlindDispatcher, GroupMemberAdmission
-from graber.group_controller import Controller, GroupResult, parse_action
-from graber.protocol import CommandKind, Rail
+from graber.control.dispatcher import BlindDispatcher, GroupMemberAdmission
+from graber.control.group_controller import Controller, GroupResult, parse_action
+from graber.bluetooth.protocol import CommandKind, Rail
 
 
 class FakeBlind:

@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from graber.mqtt_bridge import (
+from graber.integrations.mqtt_bridge import (
     BlindEntity,
     GroupEntity,
     MqttBridge,

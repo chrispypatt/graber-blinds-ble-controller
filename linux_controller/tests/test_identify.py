@@ -2,7 +2,7 @@ import stat
 from pathlib import Path
 
 from graber.diagnostics import AdapterIdentity
-from graber.identify_cli import (
+from graber.setup.identify_cli import (
     MotorObservation, decode_candidate_access_code, update_observation,
     write_private_inventory,
 )

@@ -4,8 +4,8 @@ from pathlib import Path
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from graber.auth import AuthManager, PasswordStore
-from graber.portal import ModeSupervisor, create_app, is_command_request
+from graber.security import AuthManager, PasswordStore
+from graber.webapp.portal import ModeSupervisor, create_app, is_command_request
 
 
 PASSWORD = "correct horse battery staple"

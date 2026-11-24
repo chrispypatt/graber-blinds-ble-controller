@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from graber.web import WebControlService, WebRequestError, WebSettings, create_app
+from graber.webapp.web import WebControlService, WebRequestError, WebSettings, create_app
 
 
 class FakeController:

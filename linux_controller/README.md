@@ -1,9 +1,7 @@
 # Linux controller
 
 This package is the independently deployable Raspberry Pi/BlueZ implementation.
-Live Bluetooth and web movement controls remain disabled until private
-configuration is supplied and the supervised pilot steps in
-`../docs/RPI5_MIGRATION.md` are followed.
+The service starts in setup mode until the private shade inventory is saved.
 
 For deployment, use `deploy/install.sh` and complete the browser setup wizard
 described in `../docs/RPI5_SETUP.md`. Manual configuration and command-line
@@ -47,4 +45,5 @@ MQTT Discovery publishes native Home Assistant shade covers, including a
 command-only full-shade Open/Close/Stop cover for each TDBU motor alongside its
 independent rail covers. Expose these covers directly through Home Assistant
 Cloud for Alexa instead of duplicating movement commands as scripts. See the
-setup and migration guides for the exposure and cleanup steps.
+[Home Assistant setup instructions](../docs/RPI5_SETUP.md#home-assistant)
+for the exposure settings.

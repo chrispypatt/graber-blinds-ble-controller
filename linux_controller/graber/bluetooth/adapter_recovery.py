@@ -5,7 +5,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .diagnostics import AdapterIdentity, _bluez_property, _default_runner, discover_adapters
+from ..diagnostics.adapters import AdapterIdentity, _bluez_property, _default_runner, discover_adapters
 
 LOG = logging.getLogger("graber")
 

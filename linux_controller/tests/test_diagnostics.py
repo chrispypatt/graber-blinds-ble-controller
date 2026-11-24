@@ -281,7 +281,7 @@ async def test_runtime_recovers_moved_adapter_and_preserves_logical_id(monkeypat
     from graber.diagnostics import resolve_configured_adapters
 
     adapter = AdapterIdentity("hci1", "AA:BB:CC:DD:EE:01", False, "0a12", "0001", usb_path="3-1")
-    monkeypatch.setattr("graber.diagnostics.discover_adapters", lambda: [adapter])
+    monkeypatch.setattr("graber.diagnostics.adapters.discover_adapters", lambda: [adapter])
     attempts = []
 
     def recover(candidate):
@@ -297,6 +297,6 @@ async def test_runtime_recovers_moved_adapter_and_preserves_logical_id(monkeypat
     assert attempts == [adapter]
 
     duplicate = AdapterIdentity("hci2", adapter.address, True, "0a12", "0001", usb_path="2-1")
-    monkeypatch.setattr("graber.diagnostics.discover_adapters", lambda: [adapter, duplicate])
+    monkeypatch.setattr("graber.diagnostics.adapters.discover_adapters", lambda: [adapter, duplicate])
     assert await resolve_configured_adapters((opted_in,), recover_power=recover) == []
     assert attempts == [adapter]

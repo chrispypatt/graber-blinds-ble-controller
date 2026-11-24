@@ -3,7 +3,10 @@
 ## Prerequisites
 
 - Raspberry Pi OS Lite 64-bit on the local network.
-- External Bluetooth USB adapters in HCI mode and connected before setup.
+- External Bluetooth USB adapters in HCI mode (visible to Linux as Bluetooth
+  controllers), connected before setup. The Pi 5 test system used USB adapters
+  reporting CSR8510 A10, Bluetooth 4.0, USB ID `0a12:0001`. This identifier
+  is shared by multiple products.
 - The reviewed Raspberry Pi branch of this repository.
 
 Prefer 5 GHz Wi-Fi and separate the Bluetooth adapters with USB extension
@@ -14,12 +17,16 @@ lsusb
 bluetoothctl list
 ```
 
-The onboard Bluetooth controller may also appear. The installer selects powered
-external USB controllers for setup.
+The onboard Bluetooth controller may also appear. Setup discovers powered
+external USB controllers. In a paired cold-start test across six shades, the
+assigned USB adapters completed 48 of 48 status reads. The Pi 5 onboard radio
+completed 45 of 48. Its median time to connect was longer on every shade, and
+it had three timeouts. These measurements cover connection and status reads.
+Group movement was timed separately with USB adapters.
 
-If an adapter appears only in `lsusb`, it may be in HID mode. Confirm the exact
-Feasycom procedure for that device and firmware. Do not flash firmware or run a
-generic HID-to-HCI conversion command without a recovery plan.
+If an adapter appears only in `lsusb`, it may be in HID mode. Check the
+manufacturer's HCI-mode instructions for your exact model and firmware before
+attempting a mode switch.
 
 ## Install and start
 
@@ -72,8 +79,18 @@ In the wizard:
 1. Scan for shades.
 2. Identify and name each shade.
 3. Confirm single-rail or TDBU type.
-4. Choose its preferred adapter.
-5. Add room or whole-home groups.
+4. Choose its preferred adapter. Spread shades you often operate together
+   across USB adapters. For a six-shade group, start with three shades per
+   adapter on two radios, or two per adapter on three radios. The controller
+   can start work on each radio independently. Three cold group Opens tested
+   on the three-per-radio split completed on all six shades. Start with one
+   new connection at a time on each radio (`max_cold_connections = 1`), then
+   use the performance report to tune for your installation.
+5. Add each shade to the groups you want to operate with one command. For
+   example, a dining shade can belong to both “Dining Room” and “Main Floor”.
+   Opening Main Floor from the control page sends Open to each member on its
+   assigned adapter. With MQTT enabled, Home Assistant also discovers a cover
+   for groups with at least two shades. Individual controls remain available.
 6. Review the table and save.
 
 Saving writes the private configuration and switches the same web address to
@@ -131,11 +148,14 @@ reappears. It does not fall back to onboard Bluetooth or require a Pi reboot.
 To validate recovery without moving a shade:
 
 1. Pause shade automations and confirm no command is active in the control page.
-2. Record the two external adapters with `bluetoothctl list` and `/opt/graber-controller/.venv/bin/python -m graber.diagnostic_cli adapters --expected 2`.
+2. Record the external adapters with `bluetoothctl list`. Run the adapter
+   diagnostic with your installed count, for example
+   `/opt/graber-controller/.venv/bin/python -m graber.diagnostic_cli adapters --expected 2`
+   for two USB adapters.
 3. Disconnect one USB adapter, leaving the other attached. Confirm its health
    becomes `unavailable` while unrelated shades and the service remain available.
 4. Reconnect it to the same USB path. Confirm health returns to `online` without
-   restarting the service, then repeat for the other adapter.
+   restarting the service, then repeat for each remaining adapter.
 
 Health includes connection attempts/successes, failures, disconnects,
 recoveries, and the last unavailable/recovered times. This validation performs
@@ -179,19 +199,23 @@ the installer does not install Caddy, change DNS, or modify network settings.
 See Caddy's [local HTTPS documentation](https://caddyserver.com/docs/automatic-https#local-https)
 for its internal certificate authority and client trust model.
 
-The installer already defaults to a loopback portal with Secure cookies. If
-Caddy runs on the same host, set the trusted proxy before running the installer:
+The installer defaults to a loopback portal with Secure cookies. When Caddy
+runs on the Pi, trust the loopback proxy and allow the addresses of devices
+that should reach the portal. For a new install, substitute your client LAN's
+subnet for the example below.
 
 ```sh
 export GRABER_PORTAL_TRUSTED_PROXIES=127.0.0.0/8,::1/128
+export GRABER_ALLOWED_NETWORKS=127.0.0.0/8,::1/128,192.168.1.0/24
 sudo -E ./deploy/install.sh --apply
 ```
 
-For an existing install, set `GRABER_PORTAL_HOST=127.0.0.1`,
-`GRABER_PORTAL_SECURE_COOKIE=true`, and
-`GRABER_PORTAL_TRUSTED_PROXIES=127.0.0.0/8,::1/128` in the private
-`/etc/graber-controller/controller.env`. This trusts forwarded client addresses
-only from the loopback proxy. Restart the service after the HTTPS proxy is ready.
+For an existing install, edit the private `/etc/graber-controller/controller.env`.
+Set `GRABER_PORTAL_HOST=127.0.0.1`, `GRABER_PORTAL_SECURE_COOKIE=true`, and
+`GRABER_PORTAL_TRUSTED_PROXIES=127.0.0.0/8,::1/128`. Include the client
+subnet in `GRABER_PORTAL_ALLOWED_NETWORKS`. The portal then checks the client
+address forwarded by the loopback proxy. Restart the service after the HTTPS
+proxy is ready.
 
 Choose a private hostname, configure it in local DNS, install Caddy separately,
 and adapt the example Caddyfile. It rejects clients outside private address
@@ -214,9 +238,9 @@ cover, battery, diagnostic, availability, and adapter-health entities before
 changing dashboards or automations. Movement command topics are never retained.
 Use broker TLS when it is available; see [Security and privacy](SECURITY.md).
 
-Never leave two automated controller paths active for the same shade. Follow
-the [cutover and rollback procedure](RPI5_MIGRATION.md#home-assistant-cutover)
-when replacing another controller.
+If replacing an existing controller, disable its shade automations before
+issuing the first movement through the Pi. Verify a single supervised shade
+before enabling group automations.
 
 ### Alexa through Home Assistant Cloud
 

@@ -8,16 +8,11 @@ import pytest
 
 from graber.config import load_config
 from graber.diagnostics import AdapterIdentity
-from graber.identify_cli import MotorObservation
-from graber.identify_web import (
-    DeviceSetup,
-    SetupSession,
-    load_known_credentials,
-    load_saved_setup,
-    opaque_id,
-    select_usb_adapters,
-)
-from graber.identify_web import SetupWebSettings, create_app
+from graber.setup.identify_cli import MotorObservation
+from graber.setup.configuration import load_known_credentials, load_saved_setup
+from graber.setup.devices import DeviceSetup, opaque_id
+from graber.setup.session import SetupSession, select_usb_adapters
+from graber.setup.identify_web import SetupWebSettings, create_app
 
 
 def make_session(tmp_path: Path) -> tuple[SetupSession, str]:
@@ -82,7 +77,7 @@ def test_setup_discovers_hotplug_and_saves_new_usb_adapter(tmp_path: Path, monke
         scanned.append(adapter)
         return []
 
-    monkeypatch.setattr("graber.identify_web.scan", fake_scan)
+    monkeypatch.setattr("graber.setup.session.scan", fake_scan)
     session = SetupSession(inventory, export_dir=tmp_path, saved_setup=saved,
                            controller_addresses=[existing.address],
                            adapter_discovery=lambda: list(inventory))
@@ -143,7 +138,7 @@ def test_partial_setup_keeps_assignments_and_refuses_export(tmp_path: Path, monk
     async def fake_scan(_adapter, _seconds):
         return [original.devices[key].observation]
 
-    monkeypatch.setattr("graber.identify_web.scan", fake_scan)
+    monkeypatch.setattr("graber.setup.session.scan", fake_scan)
     asyncio.run(partial.scan_all())
     payload = partial.state(allow_jog=False)
     assert payload["missing_adapters"] == 1
@@ -216,13 +211,13 @@ def test_known_credentials_prefill_by_address_but_never_reach_browser(tmp_path: 
     async def fake_scan(_adapter, _seconds):
         return [MotorObservation("RRBZ_TEST", "11:22:33:44:55:66", [-55], 10, 70)]
 
-    import graber.identify_web as identify_web
-    original = identify_web.scan
-    identify_web.scan = fake_scan
+    from graber.setup import session as setup_session
+    original = setup_session.scan
+    setup_session.scan = fake_scan
     try:
         asyncio.run(session.scan_all())
     finally:
-        identify_web.scan = original
+        setup_session.scan = original
     device = session.state(allow_jog=False)["devices"][0]
     assert device["has_access_code"] is True
     assert "access_code" not in device
@@ -245,13 +240,13 @@ def test_scan_suggests_tdbu_only_for_nonzero_top_position(tmp_path: Path):
             MotorObservation("RRBZ_AMBIGUOUS", "11:22:33:44:55:77", [-55], 10, 0),
         ]
 
-    import graber.identify_web as identify_web
-    original = identify_web.scan
-    identify_web.scan = fake_scan
+    from graber.setup import session as setup_session
+    original = setup_session.scan
+    setup_session.scan = fake_scan
     try:
         asyncio.run(session.scan_all())
     finally:
-        identify_web.scan = original
+        setup_session.scan = original
 
     devices = {item.observation.name: item for item in session.devices.values()}
     assert devices["RRBZ_TDBU"].dual_rail is True
@@ -275,13 +270,13 @@ def test_scan_restores_saved_names_groups_type_adapter_and_code(tmp_path: Path):
     async def fake_scan(_adapter, _seconds):
         return [MotorObservation("RRBZ_TEST", "11:22:33:44:55:66", [-55], 10, 0)]
 
-    import graber.identify_web as identify_web
-    old_scan = identify_web.scan
-    identify_web.scan = fake_scan
+    from graber.setup import session as setup_session
+    old_scan = setup_session.scan
+    setup_session.scan = fake_scan
     try:
         asyncio.run(restored.scan_all())
     finally:
-        identify_web.scan = old_scan
+        setup_session.scan = old_scan
 
     device = restored.devices[key]
     assert device.friendly_name == "Living Left"

@@ -8,10 +8,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
-from .blind import BlindCommand, CommandResult, Outcome
-from .config import GroupConfig
-from .dispatcher import BlindDispatcher
-from .protocol import CommandKind, Rail, ha_to_raw_position, raw_to_ha_position
+from .commands import BlindCommand, CommandResult, Outcome
+from graber.config import GroupConfig
+from graber.control.dispatcher import BlindDispatcher
+from graber.bluetooth.protocol import CommandKind, Rail, ha_to_raw_position, raw_to_ha_position
 
 
 @dataclass

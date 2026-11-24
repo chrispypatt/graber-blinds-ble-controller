@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from graber.adapter_manager import AdapterManager, AdapterUnavailable, ResolvedAdapter
+from graber.bluetooth.adapter_manager import AdapterManager, AdapterUnavailable, ResolvedAdapter
 from graber.config import AdapterConfig, BlindConfig
 
 
@@ -341,5 +341,32 @@ def test_resolver_failure_is_contained_and_health_recovers():
         healthy = manager.health()["a"]
         assert healthy["status"] == "online"
         assert healthy["last_resolution_error"] is None
+
+    run(scenario())
+
+
+def test_rebinding_hci_name_preserves_last_observed_unavailable_time(monkeypatch):
+    config = AdapterConfig("a", "AA:00:00:00:00:01")
+    snapshots = iter(("hci1", "hci2", None, "hci2", "hci3"))
+
+    async def resolver(_configs):
+        device = next(snapshots)
+        return [] if device is None else [ResolvedAdapter("a", config.controller_address, device)]
+
+    times = iter((1, 2, 3, 4, 5))
+    monkeypatch.setattr("graber.bluetooth.adapter_manager.time.time", lambda: next(times))
+    manager = AdapterManager((config,), resolver)
+
+    async def scenario():
+        await manager.refresh()
+        await manager.refresh()  # New hci name, with no observed outage.
+        assert manager.health()["a"]["last_unavailable"] is None
+        await manager.refresh()  # Missing at time 3.
+        await manager.refresh()  # Rediscovered at time 4.
+        await manager.refresh()  # Rebound between refreshes again.
+        health = manager.health()["a"]
+        assert health["last_unavailable"] == 3
+        assert health["last_recovered"] == 5
+        assert health["disconnects"] == health["recoveries"] == 3
 
     run(scenario())

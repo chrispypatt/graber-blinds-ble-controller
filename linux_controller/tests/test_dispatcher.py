@@ -1,9 +1,9 @@
 import asyncio
 
-from graber.blind import BlindCommand, CommandResult, Outcome
-from graber.dispatcher import BlindDispatcher
-from graber.group_controller import Controller
-from graber.protocol import CommandKind
+from graber.control.blind import BlindCommand, CommandResult, Outcome
+from graber.control.dispatcher import BlindDispatcher
+from graber.control.group_controller import Controller
+from graber.bluetooth.protocol import CommandKind
 
 
 class FakeConfig:

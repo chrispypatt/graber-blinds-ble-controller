@@ -1,6 +1,6 @@
 import pytest
 
-from graber import protocol
+from graber.bluetooth import protocol
 
 
 def values(steps):

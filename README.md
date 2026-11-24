@@ -29,12 +29,12 @@ hardware or move a shade.
 python3 -m venv .venv-linux
 . .venv-linux/bin/activate
 pip install --require-hashes --only-binary=:all: -r linux_controller/requirements-dev.lock
-make test
+make check
 ```
 
-Then read the [architecture audit](docs/ARCHITECTURE_AUDIT.md),
-[Pi setup guide](docs/RPI5_SETUP.md), and
-[supervised migration/rollback guide](docs/RPI5_MIGRATION.md).
+For installation and operation, see the [Pi setup guide](docs/RPI5_SETUP.md).
+To follow a command from the web or Home Assistant through Bluetooth and back,
+see the [controller architecture](docs/ARCHITECTURE.md).
 
 ## Identification and setup
 
@@ -49,13 +49,22 @@ written only to an explicit mode-`0600` path.
 
 ## Layout
 
-```text
-linux_controller/graber/       controller, protocol, MQTT, web, setup tools
-linux_controller/tests/        hardware-free Phase A tests
-deploy/                         repeatable installer and systemd service
-docs/PROTOCOL.md               observed protocol and uncertainty boundaries
-docs/RPI5_SETUP.md             Pi/adapters/install/identification
-docs/RPI5_MIGRATION.md         pilot, acceptance, cutover, rollback
-```
+| Path | What lives here |
+| --- | --- |
+| [graber/main.py](linux_controller/graber/main.py), [graber/config.py](linux_controller/graber/config.py) | Service startup and configuration |
+| [graber/setup/](linux_controller/graber/setup/) | Device identification and the setup wizard |
+| [graber/webapp/](linux_controller/graber/webapp/) | Portal, control API, browser scripts and page templates |
+| [graber/security/](linux_controller/graber/security/) | Portal credentials and sessions |
+| [graber/control/](linux_controller/graber/control/) | Per-blind commands, queues, and group coordination |
+| [graber/bluetooth/](linux_controller/graber/bluetooth/) | Radio selection, BlueZ connections, and motor protocol |
+| [graber/integrations/](linux_controller/graber/integrations/) | MQTT commands and Home Assistant discovery |
+| [graber/diagnostics/](linux_controller/graber/diagnostics/) | Adapter inspection, command metrics, and reports |
+| [graber/util/](linux_controller/graber/util/) | Private-file and encoding helpers |
+| [linux_controller/tests/](linux_controller/tests/) | Hardware-free controller tests |
+| [deploy/](deploy/) | Installer, launch scripts, systemd units, and example HTTPS proxy |
+
+For characteristic
+UUIDs, command sequences, and the motor models tested, see the
+[observed protocol](docs/PROTOCOL.md).
 
 This is reverse-engineered community software, not an official Graber product.

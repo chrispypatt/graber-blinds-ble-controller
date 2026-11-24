@@ -2,7 +2,7 @@ from pathlib import Path
 import re
 
 
-PACKAGE = Path(__file__).parents[1] / "graber"
+PACKAGE = Path(__file__).parents[1] / "graber" / "webapp"
 
 
 def test_browser_ui_never_stores_or_requests_internal_control_token():

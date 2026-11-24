@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Awaitable, Callable
 
-from .config import AdapterConfig, BlindConfig
+from ..config import AdapterConfig, BlindConfig
 
 
 class AdapterUnavailable(RuntimeError):
@@ -108,32 +108,39 @@ class AdapterManager:
                 return
             now = time.time()
             for adapter_id, runtime in self._runtime.items():
-                runtime.stats.last_resolution_error = None
-                previous = runtime.resolved
-                current = resolved.get(adapter_id)
-                if previous is not None and current is None:
-                    self._mark_unavailable(runtime, "adapter not found during refresh", now=now)
-                    continue
-                if current is not None:
-                    # A controller can return with a different transient hci name.
-                    # Keep the logical adapter ID when its physical path changes.
-                    if (runtime.config.usb_path and current.usb_path != runtime.config.usb_path
-                            and (previous is None or previous.usb_path != current.usb_path)):
-                        logging.getLogger("graber").warning(
-                            "adapter %s USB path changed from %s to %s",
-                            adapter_id, runtime.config.usb_path, current.usb_path,
-                        )
-                    rebound = previous is not None and previous.device != current.device
-                    recovered = previous is None and runtime.stats.last_unavailable is not None
-                    if rebound or recovered:
-                        if rebound:
-                            runtime.stats.disconnects += 1
-                            runtime.stats.last_unavailable = now
-                        runtime.stats.recoveries += 1
-                        runtime.stats.last_recovered = now
-                        runtime.stats.last_error = None
-                    runtime.resolved = current
-                    runtime.stats.last_seen = now
+                self._update_resolution(runtime, resolved.get(adapter_id), now)
+
+    def _update_resolution(
+        self, runtime: AdapterRuntime, current: ResolvedAdapter | None, now: float,
+    ) -> None:
+        runtime.stats.last_resolution_error = None
+        previous = runtime.resolved
+        if current is None:
+            if previous is not None:
+                self._mark_unavailable(runtime, "adapter not found during refresh", now=now)
+            return
+
+        expected_path = runtime.config.usb_path
+        if expected_path and current.usb_path != expected_path and (
+            previous is None or previous.usb_path != current.usb_path
+        ):
+            logging.getLogger("graber").warning(
+                "adapter %s USB path changed from %s to %s",
+                runtime.config.id, expected_path, current.usb_path,
+            )
+
+        rebound = previous is not None and previous.device != current.device
+        recovered = previous is None and runtime.stats.last_unavailable is not None
+        if rebound:
+            # A new hci name implies a disconnect between samples. Only
+            # _mark_unavailable knows when we actually observed an outage.
+            runtime.stats.disconnects += 1
+        if rebound or recovered:
+            runtime.stats.recoveries += 1
+            runtime.stats.last_recovered = now
+            runtime.stats.last_error = None
+        runtime.resolved = current
+        runtime.stats.last_seen = now
 
     async def candidates(self, blind: BlindConfig) -> list[AdapterRuntime]:
         if not any(runtime.resolved for runtime in self._runtime.values()):

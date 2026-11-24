@@ -5,128 +5,13 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Callable, Protocol
+
+from .bluez_observer import BluezPhaseObserver
 
 
 Notification = Callable[[bytes], None]
 BLUEZ_CLEANUP_TIMEOUT_S = 5.0
-BLUEZ_PROPERTY_INTERFACE = "org.freedesktop.DBus.Properties"
-BLUEZ_DEVICE_INTERFACE = "org.bluez.Device1"
-BLUEZ_OBSERVER_TIMEOUT_S = 0.2
-
-
-@dataclass
-class _BluezConnectPhases:
-    started_at: float
-    first_link_at: float | None = None
-    last_link_at: float | None = None
-    services_resolved_at: float | None = None
-    link_up_count: int = 0
-    link_drop_count: int = 0
-
-    def update(self, properties: dict[str, Any], now: float) -> None:
-        connected = properties.get("Connected")
-        if connected is not None:
-            if connected.value:
-                self.link_up_count += 1
-                if self.first_link_at is None:
-                    self.first_link_at = now
-                self.last_link_at = now
-            else:
-                self.link_drop_count += 1
-                self.services_resolved_at = None
-        resolved = properties.get("ServicesResolved")
-        if resolved is not None:
-            self.services_resolved_at = now if resolved.value else None
-
-    def metrics(self) -> dict[str, float | int]:
-        result: dict[str, float | int] = {
-            "bluez_link_up_count": self.link_up_count,
-            "bluez_link_drop_count": self.link_drop_count,
-        }
-        for key, when in (
-            ("bluez_first_link_ms", self.first_link_at),
-            ("bluez_last_link_ms", self.last_link_at),
-            ("bluez_services_resolved_ms", self.services_resolved_at),
-        ):
-            if when is not None:
-                result[key] = (when - self.started_at) * 1000
-        if (
-            self.last_link_at is not None
-            and self.services_resolved_at is not None
-            and self.services_resolved_at >= self.last_link_at
-        ):
-            result["bluez_service_resolution_ms"] = (
-                self.services_resolved_at - self.last_link_at
-            ) * 1000
-        return result
-
-
-class _BluezPhaseObserver:
-    """Receive read-only property signals and retain data only for tracked paths."""
-
-    def __init__(self) -> None:
-        self._bus: Any = None
-        self._lock = asyncio.Lock()
-        self._retry_at = 0.0
-        self.pending: dict[str, _BluezConnectPhases] = {}
-
-    def _on_message(self, message: Any) -> None:
-        phases = self.pending.get(message.path)
-        if (
-            phases is not None
-            and message.message_type.name == "SIGNAL"
-            and message.interface == BLUEZ_PROPERTY_INTERFACE
-            and message.member == "PropertiesChanged"
-            and message.signature == "sa{sv}as"
-            and message.body[0] == BLUEZ_DEVICE_INTERFACE
-        ):
-            phases.update(message.body[1], time.monotonic())
-
-    async def ensure_subscribed(self) -> bool:
-        async with self._lock:
-            if self._bus is not None and self._bus.connected:
-                return True
-            if time.monotonic() < self._retry_at:
-                return False
-            bus = None
-            subscribed = False
-            try:
-                from dbus_fast import BusType, Message, MessageType
-                from dbus_fast.aio import MessageBus
-
-                async with asyncio.timeout(BLUEZ_OBSERVER_TIMEOUT_S):
-                    bus = MessageBus(bus_type=BusType.SYSTEM)
-                    await bus.connect()
-                    bus.add_message_handler(self._on_message)
-                    rule = (
-                        "type='signal',sender='org.bluez',"
-                        f"interface='{BLUEZ_PROPERTY_INTERFACE}',member='PropertiesChanged',"
-                        f"arg0='{BLUEZ_DEVICE_INTERFACE}'"
-                    )
-                    reply = await bus.call(Message(
-                        destination="org.freedesktop.DBus",
-                        path="/org/freedesktop/DBus",
-                        interface="org.freedesktop.DBus",
-                        member="AddMatch",
-                        signature="s",
-                        body=[rule],
-                    ))
-                    subscribed = reply is not None and reply.message_type == MessageType.METHOD_RETURN
-            except Exception:
-                # The diagnostic subscription must not prevent a motor connection.
-                pass
-            finally:
-                if bus is not None and not subscribed:
-                    try:
-                        bus.disconnect()
-                    except Exception:
-                        pass
-            if subscribed:
-                self._bus = bus
-            else:
-                self._retry_at = time.monotonic() + 60
-            return subscribed
 
 
 @dataclass(frozen=True)
@@ -197,7 +82,7 @@ class BleakTransport:
         self._advertisements: dict[tuple[str, str], tuple[float, DiscoveredDevice]] = {}
         self._advertisement_events: dict[tuple[str, str], asyncio.Event] = {}
         self._monitored_adapters: set[str] = set()
-        self._phase_observer = _BluezPhaseObserver()
+        self._phase_observer = BluezPhaseObserver()
 
     @staticmethod
     def _discovered(device: object, advertisement: object) -> DiscoveredDevice:
@@ -291,18 +176,11 @@ class BleakTransport:
         # Passing the scanned BLEDevice avoids Bleak's implicit discovery path.
         details = getattr(device.device, "details", None)
         path = details.get("path") if isinstance(details, dict) else None
-        observer = self._phase_observer if isinstance(path, str) else None
-        phases = None
-        if observer is not None and await observer.ensure_subscribed() and path not in observer.pending:
-            phases = _BluezConnectPhases(time.monotonic())
-            observer.pending[path] = phases
-        try:
-            client = self._client_type(device.device, adapter=adapter, timeout=timeout_s)
-            await asyncio.wait_for(client.connect(), timeout_s)
-        except (Exception, asyncio.CancelledError) as exc:
-            if phases is not None:
-                exc.connection_phase_metrics = phases.metrics()
-            if not isinstance(exc, asyncio.CancelledError):
+        async with self._phase_observer.track(path if isinstance(path, str) else None) as phases:
+            try:
+                client = self._client_type(device.device, adapter=adapter, timeout=timeout_s)
+                await asyncio.wait_for(client.connect(), timeout_s)
+            except Exception as exc:
                 if getattr(exc, "dbus_error", None) in {
                     "org.bluez.Error.NotReady",
                     "org.freedesktop.DBus.Error.NameHasNoOwner",
@@ -310,11 +188,7 @@ class BleakTransport:
                 }:
                     self.invalidate_adapter(adapter)
                 else:
-                    # Losing the target's Device1 object or link says nothing about
-                    # cached objects for other blinds on this adapter.
+                    # Losing a single Device1 object leaves the other cached peers valid.
                     self._advertisements.pop((adapter, device.address.upper()), None)
-            raise
-        finally:
-            if phases is not None:
-                observer.pending.pop(path, None)
-        return BleakConnection(client, phases.metrics() if phases is not None else None)
+                raise
+            return BleakConnection(client, phases.metrics() if phases is not None else None)

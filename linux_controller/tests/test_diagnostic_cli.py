@@ -1,6 +1,6 @@
 import json
 
-from graber.diagnostic_cli import main
+from graber.diagnostics.cli import main
 
 
 def test_report_includes_rotation_and_honors_time_boundaries(tmp_path, capsys):

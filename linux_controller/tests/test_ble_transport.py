@@ -3,8 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import graber.ble_transport as ble_transport
-from graber.ble_transport import BleakConnection, BleakTransport
+import graber.bluetooth.ble_transport as ble_transport
+from graber.bluetooth.ble_transport import BleakConnection, BleakTransport
+from graber.bluetooth.bluez_observer import BluezConnectPhases, BluezPhaseObserver
 
 
 class FakeDevice:
@@ -41,6 +42,7 @@ class FakeScanner:
 
 def make_transport():
     transport = object.__new__(BleakTransport)
+    transport._phase_observer = BluezPhaseObserver()
     transport._client_type = object
     transport._scanner_type = FakeScanner
     transport._advertisements = {}
@@ -150,7 +152,7 @@ def test_connect_failure_discards_only_affected_advertisements(dbus_error, peer_
 def test_connect_metrics_track_only_attempt_device_and_count_hidden_reconnects():
     async def scenario():
         transport = make_transport()
-        observer = ble_transport._BluezPhaseObserver()
+        observer = BluezPhaseObserver()
         transport._phase_observer = observer
         device = FakeDevice()
         device.details = {"path": "/org/bluez/hci9/dev_11_22_33_44_55_66"}
@@ -253,3 +255,20 @@ def test_bluez_cleanup_operations_are_bounded(monkeypatch):
         assert "hci9" not in transport._monitored_adapters
 
     asyncio.run(scenario())
+
+
+def test_bluez_service_discovery_stays_cleared_until_link_returns():
+    phases = BluezConnectPhases(started_at=0)
+    up = SimpleNamespace(value=True)
+    down = SimpleNamespace(value=False)
+    phases.update({"Connected": up, "ServicesResolved": up}, 1)
+    assert phases.services_resolved_at == 1
+
+    phases.update({"Connected": down, "ServicesResolved": up}, 2)
+    assert phases.services_resolved_at is None
+    phases.update({"ServicesResolved": up}, 3)
+    assert "bluez_services_resolved_ms" not in phases.metrics()
+
+    phases.update({"Connected": up}, 4)
+    phases.update({"ServicesResolved": up}, 5)
+    assert phases.metrics()["bluez_service_resolution_ms"] == 1000

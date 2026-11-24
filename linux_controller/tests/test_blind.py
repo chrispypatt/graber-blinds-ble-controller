@@ -4,14 +4,15 @@ import time
 
 import pytest
 
-from graber.adapter_manager import AdapterManager, ResolvedAdapter
-from graber.ble_transport import DiscoveredDevice
-from graber.blind import BlindCommand, BlindController, Outcome
+from graber.bluetooth.adapter_manager import AdapterManager, ResolvedAdapter
+from graber.bluetooth.ble_transport import DiscoveredDevice
+from graber.control.blind import BlindController
+from graber.control.commands import BlindCommand, Outcome
 from graber.config import AdapterConfig, BlindConfig, RetryConfig
-from graber.dispatcher import BlindDispatcher
-from graber.group_controller import Controller
+from graber.control.dispatcher import BlindDispatcher
+from graber.control.group_controller import Controller
 from graber.main import publish_command_lifecycle
-from graber.protocol import (
+from graber.bluetooth.protocol import (
     AUTH_CHARACTERISTIC, BATTERY_CHARACTERISTIC, BOTTOM_POSITION_CHARACTERISTIC, BOTTOM_TARGET_CHARACTERISTIC,
     EXECUTE_CHARACTERISTIC, TOP_POSITION_CHARACTERISTIC, TOP_TARGET_CHARACTERISTIC, CommandKind, Rail,
 )
@@ -140,7 +141,7 @@ def test_dispatcher_conflict_cancels_target_write_and_sends_dual_rail_stop(stop_
                 "blind", "set_bottom_position", 42, command_id="first",
             ))
             await asyncio.wait_for(connection.target_started.wait(), 1)
-            blind._last_change = time.monotonic() - 3
+            blind._feedback._last_change = time.monotonic() - 3
             conflict = await asyncio.wait_for(controller.submit_command(
                 "blind", "set_top_position", 10, command_id="second",
             ), 2)
@@ -332,7 +333,7 @@ def test_final_ack_without_feedback_is_not_replayed():
 def test_full_open_rechecks_both_rails_after_intermediate_feedback(
     monkeypatch, quiet_interval, direct_top, expected,
 ):
-    monkeypatch.setattr("graber.blind.ENDPOINT_RECHECK_INTERVAL_S", quiet_interval)
+    monkeypatch.setattr("graber.control.feedback.ENDPOINT_RECHECK_INTERVAL_S", quiet_interval)
 
     class MissingEndpointNotification(FakeConnection):
         async def write(self, characteristic, value):

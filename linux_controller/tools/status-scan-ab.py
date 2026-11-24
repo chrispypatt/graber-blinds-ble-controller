@@ -10,8 +10,8 @@ from bleak import BleakScanner
 from dbus_fast import BusType, Message, MessageType
 from dbus_fast.aio import MessageBus
 
-from graber.adapter_manager import AdapterManager
-from graber.ble_transport import BleakTransport
+from graber.bluetooth.adapter_manager import AdapterManager
+from graber.bluetooth.ble_transport import BleakTransport
 from graber.config import load_config
 from graber.diagnostics import resolve_configured_adapters
 

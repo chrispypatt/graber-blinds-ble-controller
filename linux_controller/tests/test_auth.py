@@ -1,9 +1,12 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
-from graber.auth import AuthError, AuthManager, LoginLimiter, PasswordStore, SessionStore, main
+from graber.security import AuthError, AuthManager, LoginLimiter, PasswordStore, SessionStore
+from graber.security.cli import main
+from graber.security import passwords
 
 
 RECOVERY_PASSWORD = "0123456789abcdef0123456789abcdef"
@@ -46,6 +49,23 @@ def test_init_is_idempotent_and_does_not_rotate_recovery(tmp_path):
     assert store.verify("admin", RECOVERY_PASSWORD)
 
 
+def test_simultaneous_initializers_preserve_the_first_recovery_credential(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    keys = [private_file(tmp_path / f"key-{i}", f"setup credential {i}") for i in range(2)]
+    ready = Barrier(2)
+    write = passwords.write_auth_text
+
+    def write_together(*args, **kwargs):
+        ready.wait(timeout=10)
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(passwords, "write_auth_text", write_together)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        created = list(executor.map(lambda key: PasswordStore(path).initialize("admin", key), keys))
+    assert sum(created) == 1
+    assert PasswordStore(path).verify("admin", keys[created.index(True)].read_text())
+
+
 def test_owner_is_separate_and_admin_is_reserved_case_insensitively(tmp_path):
     store, _ = initialized_store(tmp_path, owner=False)
     for reserved in ("admin", "Admin", "ADMIN"):
@@ -73,49 +93,26 @@ def test_reset_owner_returns_to_setup_without_removing_recovery(tmp_path):
     assert store.verify("admin", RECOVERY_PASSWORD)
 
 
-def legacy_record(username, password, *, must_change):
-    credential = PasswordStore._credential(username, password)
-    return {"version": 1, "algorithm": "scrypt", **credential,
-            "must_change_password": must_change}
-
-
-def test_v1_migration_preserves_changed_password_as_owner_and_adds_recovery(tmp_path):
-    path = private_file(
-        tmp_path / "auth.json",
-        json.dumps(legacy_record("admin", OWNER_PASSWORD, must_change=False)),
-    )
+@pytest.mark.parametrize("version", [1, 3])
+def test_unsupported_password_file_is_rejected_and_preserved(tmp_path, version):
+    path = private_file(tmp_path / "auth.json", json.dumps({"version": version, "algorithm": "scrypt"}))
+    before = path.read_bytes()
     setup = private_file(tmp_path / "setup-token", RECOVERY_PASSWORD)
     store = PasswordStore(path)
-    assert store.initialize("admin", setup)
-    assert store.verify("admin", RECOVERY_PASSWORD)
-    assert store.verify("owner", OWNER_PASSWORD)
-    assert store.owner_username == "owner"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+    with pytest.raises(AuthError, match="unsupported authentication file format"):
+        store.initialize("admin", setup)
+    assert path.read_bytes() == before
 
 
-def test_v1_bootstrap_migration_requires_owner_setup(tmp_path):
-    path = private_file(
-        tmp_path / "auth.json",
-        json.dumps(legacy_record("admin", RECOVERY_PASSWORD, must_change=True)),
-    )
+def test_init_rejects_dangling_password_file_symlink(tmp_path):
+    target = tmp_path / "missing"
+    path = tmp_path / "auth.json"
+    path.symlink_to(target)
     setup = private_file(tmp_path / "setup-token", RECOVERY_PASSWORD)
-    store = PasswordStore(path)
-    assert store.initialize("admin", setup)
-    assert store.setup_required
-    assert store.verify("admin", RECOVERY_PASSWORD)
-
-
-def test_v1_setup_token_is_not_promoted_to_owner_when_flag_was_cleared(tmp_path):
-    path = private_file(
-        tmp_path / "auth.json",
-        json.dumps(legacy_record("admin", RECOVERY_PASSWORD, must_change=False)),
-    )
-    setup = private_file(tmp_path / "setup-token", RECOVERY_PASSWORD)
-    store = PasswordStore(path)
-    assert store.initialize("admin", setup)
-    assert store.setup_required
-    assert store.owner_username is None
-    assert store.verify("admin", RECOVERY_PASSWORD)
+    with pytest.raises(AuthError, match="symlink"):
+        PasswordStore(path).initialize("admin", setup)
+    assert path.is_symlink()
+    assert not target.exists()
 
 
 def test_private_permissions_symlinks_and_malformed_costs_are_rejected(tmp_path):
@@ -233,7 +230,7 @@ def test_cli_init_recovery_rotation_and_owner_reset(tmp_path, monkeypatch, capsy
     store = PasswordStore(auth_file)
     store.set_owner("owner", OWNER_PASSWORD)
     answers = iter(["new recovery password", "new recovery password"])
-    monkeypatch.setattr("graber.auth.getpass.getpass", lambda _prompt: next(answers))
+    monkeypatch.setattr("graber.security.cli.getpass.getpass", lambda _prompt: next(answers))
     assert main(["set-recovery-password", "--file", str(auth_file)]) == 0
     assert store.verify("admin", "new recovery password")
     assert main(["reset-owner", "--file", str(auth_file)]) == 0

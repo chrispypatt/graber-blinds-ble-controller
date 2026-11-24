@@ -1,41 +1,55 @@
 [Unit]
 Description=Graber BLE controller
 Documentation=https://github.com/chrispypatt/graber-blinds-ble-controller
+# Request Bluetooth and network startup, then start after those jobs finish.
 Wants=bluetooth.service network-online.target
 After=bluetooth.service network-online.target
 
 [Service]
+# Track the foreground portal launcher under the dedicated Bluetooth-enabled account.
 Type=simple
 User=graber
 Group=graber
 SupplementaryGroups=bluetooth
+# The installer substitutes the application, configuration, and state directories.
 WorkingDirectory=@INSTALL_DIR@
 EnvironmentFile=@CONFIG_DIR@/controller.env
 ExecStart=@INSTALL_DIR@/bin/run-portal
+# Restart after a failure. On stop, send an interrupt and allow 25s for cleanup.
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=25s
 KillSignal=SIGINT
+# Strip group write and all permissions for others from newly created files.
 UMask=0027
 
-# BlueZ is accessed over the system D-Bus; the service does not need root.
+# Prevent programs from gaining privileges and isolate temp files and devices.
+# Bluetooth is accessed through BlueZ on the system D-Bus.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
+# Mount the host filesystem read-only and hide home directories.
 ProtectSystem=strict
 ProtectHome=true
+# Block changes to kernel tunables, kernel modules, and the cgroup hierarchy.
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+# Block creation of setuid/setgid files and new namespaces, lock the process
+# execution personality, and prevent writable/executable memory mappings.
 RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+# Allow writes to the private configuration and state directories.
 ReadWritePaths=@CONFIG_DIR@ @STATE_DIR@
+# Allow local Unix sockets (including D-Bus) and IPv4/IPv6 networking.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Limit system calls to the native ABI and rate-limit repetitive journal output.
 SystemCallArchitectures=native
 LogRateLimitIntervalSec=30s
 LogRateLimitBurst=200
 
 [Install]
+# Enabling the unit schedules it to start with the normal multi-user system.
 WantedBy=multi-user.target
