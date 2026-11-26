@@ -100,6 +100,24 @@ progress, and adapter health. A movement command progresses through bounded
 states such as queued, running, awaiting feedback, and a terminal result. A
 write acknowledged by the motor is not treated as proof that it moved.
 
+### Battery readings
+
+The control page and Home Assistant use the last accepted battery percentage.
+A positive reading updates it immediately. If a motor jumps from above 10%
+to 0%, the controller holds the previous value, even if the motor repeats
+zero for several days. If the last accepted reading was 10% or lower, a
+subsequent zero is accepted. A motor that has only ever reported zero shows
+an unknown level until it supplies a positive reading.
+
+The battery sensor's attributes include the raw Bluetooth reading
+(`battery_raw`), when it was read (`battery_read_at`), and when its displayed
+level was accepted (`battery_accepted_at`). Both times are Unix timestamps.
+`battery_status` distinguishes the first unexpected zero from repeated zeros.
+A private `battery-history.json` file in the portal state directory preserves
+these readings across restarts. Standalone runs use the `graber-controller`
+subdirectory of the user's XDG state directory. Each blind still gets a fresh
+status read at startup.
+
 ### Continuous performance metrics
 
 When `metrics_path` is configured, the controller continuously records a
@@ -205,6 +223,11 @@ Clients need only the public `root.crt` certificate.
 ## Home Assistant
 
 Home Assistant integration uses an existing MQTT broker and MQTT Discovery.
+The controller sends position and battery changes as they occur and repeats a
+snapshot every five minutes. Reconnecting to the broker or receiving Home
+Assistant’s online announcement also refreshes the snapshot. These snapshots
+use observations already on the Pi and do not open a Bluetooth connection.
+
 The wizard does not install a broker. Before enabling MQTT, create a dedicated
 non-administrator broker account, choose a stable controller device ID and
 topic prefix, and put the credentials only in private `secrets.toml`.

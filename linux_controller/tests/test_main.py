@@ -10,6 +10,7 @@ class FakeBlind:
             "battery_interval_s": interval_s,
         })()
         self.state = type("State", (), {"battery": battery})()
+        self.battery_read_since_start = battery is not None
         self.error = error
         self.calls = 0
         self.called = asyncio.Event()
@@ -44,6 +45,20 @@ def test_unknown_battery_refreshes_immediately():
             assert blind.state.battery == 75
         finally:
             await cancel_task(task)
+    asyncio.run(scenario())
+
+
+def test_cached_battery_still_refreshes_on_startup():
+    async def scenario():
+        blind = FakeBlind(battery=95, interval_s=3600)
+        blind.battery_read_since_start = False
+        task = asyncio.create_task(refresh_battery_periodically(blind))
+        try:
+            await asyncio.wait_for(blind.called.wait(), 0.1)
+            assert blind.calls == 1
+        finally:
+            await cancel_task(task)
+
     asyncio.run(scenario())
 
 

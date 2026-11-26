@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Callable
 
+from .battery import BatteryHistory
 from .adapter_manager import AdapterManager, AdapterRuntime
 from .ble_transport import BleConnection, BleTransport, DiscoveredDevice
 from .config import BlindConfig, RetryConfig
@@ -47,6 +48,39 @@ class PositionState:
     battery: int | None = None
     rssi: int | None = None
     updated_at: float | None = None
+    battery_raw: int | None = None
+    battery_read_at: float | None = None
+    battery_accepted_at: float | None = None
+    battery_zero_reads: int = 0
+
+    def observe_battery(self, level: int, read_at: float) -> None:
+        """Keep a credible baseline when a motor suddenly starts returning zero."""
+        self.battery_raw = level
+        self.battery_read_at = read_at
+        self.battery_zero_reads = self.battery_zero_reads + 1 if level == 0 else 0
+        # Genuine low-to-empty readings remain actionable. Repeated high-to-zero
+        # readings can persist for days, so their count alone cannot confirm empty.
+        if level > 0 or (self.battery is not None and self.battery <= 10):
+            self.battery = level
+            self.battery_accepted_at = read_at
+
+    @property
+    def battery_status(self) -> str:
+        if self.battery_raw is None:
+            return "unread"
+        if self.battery_raw == 0 and self.battery != 0:
+            return "zero_repeated" if self.battery_zero_reads > 1 else "zero_unconfirmed"
+        return "reported"
+
+    def battery_fields(self) -> dict[str, object]:
+        return {
+            "battery": self.battery,
+            "battery_raw": self.battery_raw,
+            "battery_read_at": self.battery_read_at,
+            "battery_accepted_at": self.battery_accepted_at,
+            "battery_zero_reads": self.battery_zero_reads,
+            "battery_status": self.battery_status,
+        }
 
 
 @dataclass
@@ -103,12 +137,17 @@ class BlindController:
         self, config: BlindConfig, adapters: AdapterManager, transport: BleTransport,
         retry: RetryConfig, warm_connection_s: float = 30.0,
         telemetry: Telemetry | None = None, state_listener: StateListener | None = None,
+        battery_history: BatteryHistory | None = None,
     ) -> None:
         self.config, self._adapters, self._transport = config, adapters, transport
         self._retry, self._warm_s = retry, warm_connection_s
         self._telemetry = telemetry or (lambda _event, _fields: None)
         self._state_listener = state_listener or (lambda _blind_id, _state: None)
         self.state = PositionState()
+        self.battery_read_since_start = False
+        self._battery_history = battery_history
+        if battery_history is not None:
+            battery_history.restore(config.address, self.state)
         self._lock = asyncio.Lock()
         self._session: _Session | None = None
         self._sample_counts = {Rail.BOTTOM: 0, Rail.TOP: 0}
@@ -390,19 +429,8 @@ class BlindController:
                     rail_read_ms = (time.monotonic() - rail_read_started) * 1000
                     battery_read_ms: float | None = None
                     try:
-                        battery_started = time.monotonic()
-                        raw = await asyncio.wait_for(
-                            session.connection.read(BATTERY_CHARACTERISTIC),
-                            self._retry.gatt_timeout_s,
-                        )
-                        self.state.battery = battery_from_read(raw)
-                        battery_read_ms = (time.monotonic() - battery_started) * 1000
+                        battery_read_ms = await self._read_connection_battery(session.connection, "status_refresh")
                         self._last_battery_read = time.time()
-                        self._state_listener(self.config.id, self.state)
-                        self._emit(
-                            "battery_read", value=self.state.battery,
-                            source="status_refresh", battery_read_ms=battery_read_ms,
-                        )
                     except Exception as exc:
                         self._emit("battery_read_failed", source="status_refresh",
                                    error_category=self._error_category(exc),
@@ -638,22 +666,31 @@ class BlindController:
         )
         raise CompletionUnconfirmed("GATT writes acknowledged but fresh completion feedback timed out")
 
+    async def _read_connection_battery(self, connection: BleConnection, source: str, **context: object) -> float:
+        started = time.monotonic()
+        raw = await asyncio.wait_for(connection.read(BATTERY_CHARACTERISTIC),
+                                     self._retry.gatt_timeout_s)
+        value = battery_from_read(raw)
+        duration_ms = (time.monotonic() - started) * 1000
+        self.battery_read_since_start = True
+        self.state.observe_battery(value, time.time())
+        self._emit(
+            "battery_read", value=value, accepted_value=self.state.battery,
+            battery_status=self.state.battery_status, source=source,
+            battery_read_ms=duration_ms, **context,
+        )
+        if self._battery_history is not None:
+            self._battery_history.record(self.config.address, self.state)
+        self._state_listener(self.config.id, self.state)
+        return duration_ms
+
     async def read_battery(self) -> int | None:
-        """Read once during an existing warm connection; never opens one solely here."""
+        """Read an existing warm connection and return the accepted percentage."""
         async with self._lock:
             if not self._session or not self._session.connection.connected:
                 return None
-            started = time.monotonic()
-            raw = await asyncio.wait_for(self._session.connection.read(BATTERY_CHARACTERISTIC),
-                                         self._retry.gatt_timeout_s)
-            value = battery_from_read(raw)
-            self.state.battery = value
-            self._state_listener(self.config.id, self.state)
-            self._emit(
-                "battery_read", value=value, source="warm_connection",
-                battery_read_ms=(time.monotonic() - started) * 1000,
-            )
-            return value
+            await self._read_connection_battery(self._session.connection, "warm_connection")
+            return self.state.battery
 
     async def _maybe_read_battery(self, connection: BleConnection) -> None:
         now = time.time()
@@ -663,16 +700,7 @@ class BlindController:
         # A failure never changes an otherwise completed movement result.
         self._last_battery_read = now
         try:
-            started = time.monotonic()
-            raw = await asyncio.wait_for(connection.read(BATTERY_CHARACTERISTIC),
-                                         self._retry.gatt_timeout_s)
-            self.state.battery = battery_from_read(raw)
-            self._state_listener(self.config.id, self.state)
-            self._emit(
-                "battery_read", value=self.state.battery,
-                source="post_command",
-                battery_read_ms=(time.monotonic() - started) * 1000,
-            )
+            await self._read_connection_battery(connection, "post_command")
         except Exception as exc:
             self._emit(
                 "battery_read_failed", source="post_command",
@@ -716,3 +744,5 @@ class BlindController:
         self._closed = True
         async with self._lock:
             await self._drop_session("shutdown")
+        if self._battery_history is not None:
+            await self._battery_history.flush()

@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from graber.blind import CommandResult, Outcome
+from graber.blind import CommandResult, Outcome, PositionState
 from graber.config import GroupConfig
 from graber.dispatcher import BlindDispatcher, GroupMemberAdmission
 from graber.group_controller import Controller, GroupResult, parse_action
@@ -12,7 +12,7 @@ from graber.protocol import CommandKind, Rail
 class FakeBlind:
     def __init__(self, blind_id, prepare_error=None):
         self.config = type("Config", (), {"id": blind_id, "name": blind_id, "dual_rail": False})()
-        self.state = type("State", (), {"bottom": None, "top": None, "battery": None, "rssi": None, "updated_at": None})()
+        self.state = PositionState()
         self._session = object()
         self.prepare_error = prepare_error
         self.prepare_calls = 0

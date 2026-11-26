@@ -102,7 +102,7 @@ class Controller:
         return {
             "bottom": state.bottom,
             "top": (raw_to_ha_position(Rail.TOP, state.top) if state.top is not None else None),
-            "battery": state.battery,
+            **state.battery_fields(),
             "rssi": state.rssi,
             "updated_at": state.updated_at,
         }
@@ -357,7 +357,7 @@ class Controller:
                 "id": blind_id, "name": config.name, "dual_rail": config.dual_rail,
                 "bottom": state.bottom,
                 "top": (raw_to_ha_position(Rail.TOP, state.top) if state.top is not None else None),
-                "battery": state.battery,
+                **state.battery_fields(),
                 "rssi": state.rssi, "updated_at": state.updated_at,
                 **self.diagnostics_for(blind_id),
             }
