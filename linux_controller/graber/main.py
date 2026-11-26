@@ -24,6 +24,51 @@ LOG = logging.getLogger("graber")
 # Even if a local config is accidentally set too low, background battery work
 # must remain low-frequency in production. Tests can inject a smaller floor.
 MINIMUM_BATTERY_REFRESH_S = 60.0
+MQTT_CONTACT_HEARTBEAT_S = 60.0
+
+
+class BlindDiagnosticPublisher:
+    """Publish meaningful changes immediately and coalesce contact-only updates."""
+
+    def __init__(self, loop, publish):
+        self.loop = loop
+        self.publish = publish
+        self.last_fields = None
+        self.last_contact = None
+        self.next_heartbeat = 0.0
+        self.pending = None
+        self.timer = None
+
+    def observe(self, fields, contact, *, force=False):
+        # Preserve the actual observation time even if advertisements stop.
+        if (force or fields != self.last_fields
+                or (contact is None) != (self.last_contact is None)):
+            self._send(fields, contact)
+        elif contact == self.last_contact:
+            self.cancel_pending()
+        else:
+            self.pending = (fields, contact)
+            if self.loop.time() >= self.next_heartbeat:
+                self._send(*self.pending)
+            elif self.timer is None:
+                self.timer = self.loop.call_at(self.next_heartbeat, self._flush)
+
+    def _flush(self):
+        if self.pending is not None:
+            self._send(*self.pending)
+
+    def _send(self, fields, contact):
+        self.cancel_pending()
+        self.publish(diagnostics={**fields, "last_successful_communication": contact})
+        self.last_fields = fields
+        self.last_contact = contact
+        self.next_heartbeat = self.loop.time() + MQTT_CONTACT_HEARTBEAT_S
+
+    def cancel_pending(self):
+        if self.timer is not None:
+            self.timer.cancel()
+        self.timer = None
+        self.pending = None
 
 
 def publish_command_lifecycle(
@@ -146,7 +191,15 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
                 for item in config.groups
             })
         from .protocol import Rail, raw_to_ha_position
-        def publish_state(blind_id, state) -> None:
+        diagnostics = {
+            blind_id: BlindDiagnosticPublisher(loop, partial(bridge.publish_observed_state, blind_id))
+            for blind_id in dispatchers
+        }
+        def publish_state(blind_id, state, *, force=False) -> None:
+            # Reconnect publishes the current snapshot. Queuing every Bluetooth
+            # observation during an outage can crowd out availability messages.
+            if not mqtt_client.is_connected():
+                return
             top_position = (
                 raw_to_ha_position(Rail.TOP, state.top)
                 if state.top is not None else None
@@ -159,14 +212,12 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
                           "closed" if state.bottom == 0 else "open"),
                 top_movement=(None if top_position is None else
                               "closed" if top_position == 0 else "open"),
-                diagnostics={
-                    "battery": state.battery,
-                    "last_successful_communication": (
-                        datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
-                        if state.updated_at else None
-                    ),
-                    **controller.diagnostics_for(blind_id),
-                },
+            )
+            diagnostics[blind_id].observe(
+                {"battery": state.battery, **controller.diagnostics_for(blind_id)},
+                datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
+                if state.updated_at is not None else None,
+                force=force,
             )
             bridge.publish_blind_availability(blind_id, state.updated_at is not None)
         state_sinks.append(publish_state)
@@ -176,9 +227,9 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
             for adapter_id, health in manager.health().items():
                 bridge.publish_adapter_health(adapter_id, health)
         controller.set_result_listener(publish_result)
-        def republish_current_state() -> None:
+        async def republish_current_state() -> None:
             for blind_id, dispatcher in dispatchers.items():
-                publish_state(blind_id, dispatcher.blind.state)
+                publish_state(blind_id, dispatcher.blind.state, force=True)
         attach_paho_callbacks(
             bridge,
             mqtt_client,
@@ -192,6 +243,8 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
         mqtt_client.connect_async(config.mqtt.host, config.mqtt.port)
         mqtt_client.loop_start()
         async def close_mqtt() -> None:
+            for publisher in diagnostics.values():
+                publisher.cancel_pending()
             bridge.publish_availability(False)
             mqtt_client.disconnect()
             mqtt_client.loop_stop()
@@ -267,11 +320,14 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
         )
         for blind_id, dispatcher in dispatchers.items()
     )
+    mqtt_tasks = (
+        asyncio.create_task(bridge.refresh_availability_periodically(), name="mqtt-availability"),
+    ) if bridge is not None else ()
     LOG.info("controller_ready blinds=%d adapters=%d", len(config.blinds), len(config.adapters))
     try:
         await stop.wait()
     finally:
-        background_tasks = (advertisement_task, health_task, *battery_tasks)
+        background_tasks = (advertisement_task, health_task, *battery_tasks, *mqtt_tasks)
         for task in background_tasks:
             task.cancel()
         for task in background_tasks:

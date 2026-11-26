@@ -23,6 +23,8 @@ LOG = logging.getLogger(__name__)
 class MqttClient(Protocol):
     """Small subset shared by paho and the test client."""
 
+    def is_connected(self) -> bool: ...
+
     def publish(
         self, topic: str, payload: str, qos: int = 0, retain: bool = False
     ) -> Any: ...
@@ -574,13 +576,22 @@ class MqttBridge:
         if diagnostics is not None:
             self._publish(self.diagnostics_topic(blind_id), diagnostics)
 
-    def publish_availability(self, available: bool) -> None:
+    def publish_availability(self, available: bool, *, qos: int | None = None) -> None:
         self.client.publish(
             self.availability_topic,
             "online" if available else "offline",
-            qos=self.settings.qos,
+            qos=self.settings.qos if qos is None else qos,
             retain=True,
         )
+
+    async def refresh_availability_periodically(self, *, interval_s: float = 30.0) -> None:
+        """Reassert controller availability on a live broker connection."""
+        while True:
+            await asyncio.sleep(interval_s)
+            if self.client.is_connected():
+                # A missed heartbeat is retried on the next tick without adding
+                # to the queue of unacknowledged QoS 1 traffic.
+                self.publish_availability(True, qos=0)
 
     def publish_blind_availability(self, blind_id: str, available: bool) -> None:
         if blind_id not in self.blinds:
@@ -636,10 +647,11 @@ def attach_paho_callbacks(
             report_error(error)
 
     def on_connect(_client: Any, _userdata: Any, _flags: Any, reason_code: Any, *_: Any) -> None:
+        LOG.info("MQTT connection result: %s", reason_code)
         if reason_code == 0:
             bridge.subscribe_commands()
-            bridge.publish_discovery()
             bridge.publish_availability(True)
+            bridge.publish_discovery()
             if connected_handler:
                 try:
                     result = connected_handler()
@@ -663,5 +675,9 @@ def attach_paho_callbacks(
 
         future.add_done_callback(done)
 
+    def on_disconnect(_client: Any, _userdata: Any, _flags: Any, reason_code: Any, *_: Any) -> None:
+        LOG.info("MQTT disconnected: %s", reason_code)
+
     client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
     client.on_message = on_message
