@@ -148,6 +148,12 @@ class MqttBridge:
     def full_state_topic(self, blind_id: str) -> str:
         return f"{self.settings.topic_prefix}/blind/{blind_id}/full/state"
 
+    def battery_topic(self, blind_id: str) -> str:
+        return f"{self.settings.topic_prefix}/blind/{blind_id}/battery"
+
+    def publish_battery(self, blind_id: str, fields: Mapping[str, Any]) -> None:
+        self._publish(self.battery_topic(blind_id), fields, retain=True)
+
     def diagnostics_topic(self, blind_id: str) -> str:
         return f"{self.settings.topic_prefix}/blind/{blind_id}/diagnostics"
 
@@ -236,6 +242,10 @@ class MqttBridge:
                     "availability": self._blind_availability(blind.blind_id),
                     "availability_mode": "all",
                 }
+                if key == "battery":
+                    # Battery metadata changes on battery reads, independently of other diagnostics.
+                    battery_topic = self.battery_topic(blind.blind_id)
+                    sensor.update(state_topic=battery_topic, json_attributes_topic=battery_topic)
                 if unit:
                     sensor["unit_of_measurement"] = unit
                 if device_class:
@@ -555,30 +565,36 @@ class MqttBridge:
         movement: str | None = None,
         top_movement: str | None = None,
         diagnostics: Mapping[str, Any] | None = None,
+        complete_snapshot: bool = False,
     ) -> None:
-        """Publish only feedback supplied by the state machine/advertisement path."""
+        """Retain observed state so new HA entities can subscribe after discovery."""
         if blind_id not in self.blinds:
             raise KeyError(blind_id)
-        if bottom_position is not None:
-            self._publish(self.position_topic(blind_id), str(bottom_position))
-        if top_position is not None:
-            self._publish(self.position_topic(blind_id, "top"), str(top_position))
-        if movement is not None:
-            self._publish(self.state_topic(blind_id), movement)
-        if top_movement is not None:
-            self._publish(self.state_topic(blind_id, "top"), top_movement)
-        blind = self.blinds[blind_id]
-        if blind.tdbu and bottom_position is not None and top_position is not None:
+        covers = {
+            self.position_topic(blind_id): bottom_position,
+            self.position_topic(blind_id, "top"): top_position,
+            self.state_topic(blind_id): movement,
+            self.state_topic(blind_id, "top"): top_movement,
+        }
+        full_state = None
+        if self.blinds[blind_id].tdbu and bottom_position is not None and top_position is not None:
             full_state = "closed" if bottom_position == 0 and top_position == 0 else "open"
-            self._publish(self.full_state_topic(blind_id), full_state)
+        covers[self.full_state_topic(blind_id)] = full_state
+        for topic, value in covers.items():
+            if value is not None:
+                self._publish(topic, str(value), retain=True)
+            elif complete_snapshot:
+                # Remove any retained observation from an earlier controller
+                # run or rail configuration when the current value is unknown.
+                self._publish(topic, "", retain=True)
         if diagnostics is not None:
-            self._publish(self.diagnostics_topic(blind_id), diagnostics)
+            self._publish(self.diagnostics_topic(blind_id), diagnostics, retain=True)
 
     def publish_availability(self, available: bool) -> None:
         self.client.publish(
             self.availability_topic,
             "online" if available else "offline",
-            qos=self.settings.qos,
+            qos=0,
             retain=True,
         )
 
@@ -588,7 +604,7 @@ class MqttBridge:
         self.client.publish(
             self.blind_availability_topic(blind_id),
             "online" if available else "offline",
-            qos=self.settings.qos,
+            qos=0,
             retain=True,
         )
 
@@ -599,15 +615,15 @@ class MqttBridge:
             f"{self.settings.topic_prefix}/adapter/{safe_id}/diagnostics", health, retain=True
         )
 
-    def _publish(self, topic: str, payload: Any, *, retain: bool = False) -> None:
+    def _publish(self, topic: str, payload: Any, *, retain: bool = False, qos: int = 0) -> None:
         serialized = payload if isinstance(payload, str) else json.dumps(payload, separators=(",", ":"))
-        self.client.publish(topic, serialized, qos=self.settings.qos, retain=retain)
+        self.client.publish(topic, serialized, qos=qos, retain=retain)
 
     def _publish_discovery(self, topic: str, payload: Mapping[str, Any]) -> None:
         if self._current_discovery_topics is None:
             raise RuntimeError("discovery publication is not active")
         self._current_discovery_topics.add(topic)
-        self._publish(topic, payload, retain=True)
+        self._publish(topic, payload, retain=True, qos=self.settings.qos)
 
 
 def attach_paho_callbacks(
@@ -616,6 +632,7 @@ def attach_paho_callbacks(
     loop: asyncio.AbstractEventLoop,
     error_handler: Callable[[BaseException], None] | None = None,
     connected_handler: Callable[[], Awaitable[None] | None] | None = None,
+    ha_online_handler: Callable[[], None] | None = None,
 ) -> None:
     """Attach paho callbacks without importing paho at module import time.
 
@@ -631,26 +648,44 @@ def attach_paho_callbacks(
             LOG.error("MQTT callback failed", exc_info=error)
 
     def done(completed: Any) -> None:
+        if completed.cancelled():
+            return
         error = completed.exception()
         if error is not None:
             report_error(error)
 
-    def on_connect(_client: Any, _userdata: Any, _flags: Any, reason_code: Any, *_: Any) -> None:
-        if reason_code == 0:
+    ha_status_topic = f"{bridge.settings.discovery_prefix}/status"
+    # With identical prefixes the availability pulse is our own message.
+    listen_for_ha = ha_online_handler is not None and ha_status_topic != bridge.availability_topic
+
+    def connected() -> None:
+        try:
             bridge.subscribe_commands()
-            bridge.publish_discovery()
+            if listen_for_ha:
+                client.subscribe(ha_status_topic, qos=1)
             bridge.publish_availability(True)
+            bridge.publish_discovery()
             if connected_handler:
-                try:
-                    result = connected_handler()
-                except BaseException as exc:  # callbacks must not escape Paho's thread
-                    report_error(exc)
-                else:
-                    if inspect.isawaitable(result):
-                        future = asyncio.run_coroutine_threadsafe(result, loop)
-                        future.add_done_callback(done)
+                result = connected_handler()
+                if inspect.isawaitable(result):
+                    task = asyncio.ensure_future(result, loop=loop)
+                    task.add_done_callback(done)
+        except Exception as error:
+            report_error(error)
+
+    def on_connect(_client: Any, _userdata: Any, _flags: Any, reason_code: Any, *_: Any) -> None:
+        LOG.info("MQTT connection result: %s", reason_code)
+        if reason_code == 0:
+            loop.call_soon_threadsafe(connected)
+
+    def on_disconnect(_client: Any, _userdata: Any, _flags: Any, reason_code: Any, *_: Any) -> None:
+        LOG.info("MQTT disconnected: %s", reason_code)
 
     def on_message(_client: Any, _userdata: Any, message: Any) -> None:
+        if message.topic == ha_status_topic:
+            if listen_for_ha and message.payload == b"online":
+                loop.call_soon_threadsafe(ha_online_handler)
+            return
         future = asyncio.run_coroutine_threadsafe(
             bridge.handle_message(
                 message.topic, message.payload, retained=bool(message.retain),
@@ -663,5 +698,6 @@ def attach_paho_callbacks(
 
         future.add_done_callback(done)
 
+    client.on_disconnect = on_disconnect
     client.on_connect = on_connect
     client.on_message = on_message

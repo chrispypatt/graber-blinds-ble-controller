@@ -52,6 +52,20 @@ connection opened solely for that refresh closes when the read finishes.
 Movement sessions have a configurable idle hold so a follow-up command can
 reuse the connection.
 
+## MQTT state delivery
+
+The MQTT publisher sends changed state and keeps the newest pending value for
+each topic. Cover positions, battery, and other replaceable state use QoS 0 so
+they can reach the broker while QoS 1 discovery packets await acknowledgement.
+Home Assistant keeps the same battery entity ID and subscribes to a dedicated
+retained battery topic. MQTT commands keep their existing delivery and duplicate
+handling.
+
+A broker reconnect or Home Assistant's online announcement triggers a fresh
+state snapshot. A five-minute snapshot also lets a subscriber recover a missed
+update. The controller sends an online heartbeat every 30 seconds and
+coalesces contact-only diagnostics to about once per minute per blind.
+
 ## Where to look
 
 | Question | Source under `linux_controller/graber/` |

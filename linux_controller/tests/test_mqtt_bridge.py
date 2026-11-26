@@ -369,7 +369,7 @@ def test_observed_state_is_not_published_until_called():
         "right", bottom_position=73, movement="open", diagnostics={"retry_count": 1}
     )
     assert [item[1] for item in client.published] == ["73", "open", '{"retry_count":1}']
-    assert all(item[3] is False for item in client.published)
+    assert all(item[3] is True for item in client.published)
 
 
 def test_tdbu_full_cover_state_is_derived_only_from_observed_rail_feedback():
@@ -394,8 +394,8 @@ def test_blind_availability_is_retained_and_scoped():
     bridge, client, _ = make_bridge()
     bridge.publish_availability(True)
     bridge.publish_blind_availability("left", True)
-    assert client.published[-2] == ("test-pilot/status", "online", 1, True)
-    assert client.published[-1] == ("test-pilot/blind/left/status", "online", 1, True)
+    assert client.published[-2] == ("test-pilot/status", "online", 0, True)
+    assert client.published[-1] == ("test-pilot/blind/left/status", "online", 0, True)
 
 
 def test_mqtt_duplicate_reuses_id_but_later_mid_reuse_does_not():
@@ -429,6 +429,7 @@ def test_connect_callback_can_republish_current_state():
             bridge, client, loop, connected_handler=lambda: connected.append(True)
         )
         client.on_connect(client, None, None, 0)
+        loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
     assert connected == [True]
@@ -448,7 +449,39 @@ def test_connect_callback_accepts_paho_reason_code_objects():
     try:
         attach_paho_callbacks(bridge, paho, loop)
         paho.on_connect(paho, None, None, ReasonCode())
+        loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
     assert client.subscribed
     assert any(topic.startswith("ha/cover/") for topic, *_ in client.published)
+
+def test_complete_snapshot_clears_retained_rails_that_are_now_unknown():
+    bridge, client, _ = make_bridge()
+    bridge.publish_observed_state("left", bottom_position=0, top_position=30, complete_snapshot=True)
+    client.published.clear()
+    bridge.publish_observed_state("left", bottom_position=0, movement="closed", complete_snapshot=True)
+    values = {topic: payload for topic, payload, qos, retain in client.published if retain and qos == 0}
+    assert values[bridge.full_state_topic("left")] == ""
+    assert values[bridge.position_topic("left", "top")] == ""
+    assert values[bridge.state_topic("left", "top")] == ""
+    assert values[bridge.position_topic("left")] == "0"
+
+
+def test_shared_discovery_and_state_prefix_does_not_handle_own_availability_as_ha_birth():
+    bridge, _, _ = make_bridge()
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    bridge.settings = replace(bridge.settings, discovery_prefix=bridge.settings.topic_prefix)
+    client, birth = Mock(), Mock()
+    loop = asyncio.new_event_loop()
+    try:
+        attach_paho_callbacks(bridge, client, loop, ha_online_handler=birth)
+        client.on_connect(client, None, {}, 0)
+        client.on_message(client, None, SimpleNamespace(topic=bridge.availability_topic, payload=b"online"))
+        loop.run_until_complete(asyncio.sleep(0))
+        client.subscribe.assert_not_called()
+        birth.assert_not_called()
+    finally:
+        loop.close()

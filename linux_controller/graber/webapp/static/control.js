@@ -254,10 +254,26 @@ function tdbuPositionControl(id, item) {
   </div>`;
 }
 
+function batteryLabel(item) {
+  if (!["zero_unconfirmed", "zero_repeated"].includes(item.battery_status)) {
+    return item.battery == null ? "unknown" : `${item.battery}%`;
+  }
+
+  const observation = item.battery_status === "zero_repeated"
+    ? "repeated 0% readings"
+    : "reported 0%";
+  if (item.battery == null) return `unknown · ${observation}`;
+
+  const accepted = new Date(item.battery_accepted_at * 1000);
+  const when = accepted.toLocaleString([], {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+  return `last known ${item.battery}% (${when}) · ${observation}`;
+}
+
 function blindCard(id, item) {
   const card = document.createElement("article");
   card.className = "blind-card";
-  const battery = item.battery == null ? "—" : `${escapeHtml(item.battery)}%`;
   const positionText =
     item.bottom == null
       ? "Position unknown"
@@ -275,7 +291,7 @@ function blindCard(id, item) {
         "100% · Open",
       );
   const statusControl =
-    item.bottom == null || item.battery == null
+    item.bottom == null || item.battery == null || (item.battery_raw === 0 && item.battery > 0)
       ? button("Refresh status", "refresh_status", id, "ghost compact")
       : `<span>Updated ${formatTime(item.updated_at)}</span>`;
   const visual = item.dual_rail
@@ -298,7 +314,7 @@ function blindCard(id, item) {
       <div>
         <h3>${escapeHtml(item.name || id)}</h3>
         <p class="card-meta">${item.dual_rail ? "TDBU shade" : "Single-rail shade"} · Battery
-          <span title="Battery requires a Bluetooth connection">${battery}</span>
+          <span title="Battery requires a Bluetooth connection">${escapeHtml(batteryLabel(item))}</span>
         </p>
       </div>
       <span class="badge ${item.last_command_status === "completed" ? "ready" : ""}">${targetPending("blind", id) ? "Working…" : escapeHtml(item.last_command_status || "Idle")}</span>

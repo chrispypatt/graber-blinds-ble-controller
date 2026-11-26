@@ -6,13 +6,16 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 from contextlib import AsyncExitStack, suppress
 from functools import partial
+from pathlib import Path
 
 from graber.bluetooth.adapter_manager import AdapterManager
 from graber.bluetooth.adapter_recovery import recover_adapter_power
 from graber.bluetooth.ble_transport import BleakTransport
+from graber.control.battery import BatteryHistory
 from graber.control.blind import BlindController
 from graber.config import config_paths_from_env, load_config
 from graber.control.dispatcher import BlindDispatcher
@@ -54,7 +57,7 @@ async def refresh_battery_periodically(
 ) -> None:
     """Refresh one blind's status without movement writes or rapid retries."""
     interval_s = max(minimum_interval_s, blind.config.battery_interval_s)
-    if blind.state.battery is not None:
+    if blind.battery_read_since_start:
         await asyncio.sleep(interval_s)
     while True:
         try:
@@ -98,10 +101,13 @@ async def run_service(config_path: str, secrets_path: str, *, web_override=None)
         if mqtt_service is not None:
             mqtt_service.publish_state(blind_id, state)
 
+    user_state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    state_dir = Path(os.environ.get("GRABER_PORTAL_STATE_DIR") or user_state / "graber-controller")
+    battery_history = BatteryHistory(state_dir / "battery-history.json")
     for blind_config in config.blinds:
         blind = BlindController(blind_config, manager, transport, config.retry,
                                 config.warm_connection_s, telemetry=service_telemetry,
-                                state_listener=state_changed)
+                                state_listener=state_changed, battery_history=battery_history)
         dispatchers[blind_config.id] = BlindDispatcher(
             blind, telemetry=service_telemetry
         )
@@ -227,7 +233,6 @@ def main() -> None:
     if args.portal_host or args.portal_port or args.portal_control_token_file:
         if not (args.portal_host and args.portal_port and args.portal_control_token_file):
             parser.error("portal web override requires host, port, and control token file")
-        from pathlib import Path
         from graber.webapp.web import WebSettings
         token = Path(args.portal_control_token_file).read_text(encoding="utf-8").strip()
         if not token:

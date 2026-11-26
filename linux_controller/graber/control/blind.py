@@ -17,6 +17,7 @@ from graber.bluetooth.protocol import (
     build_command, parse_manufacturer_data, position_from_notification,
 )
 
+from .battery import BatteryHistory
 from .commands import (
     BlindCommand, CommandFailure, CommandResult, CompletionUnconfirmed, Outcome, PositionState,
 )
@@ -49,12 +50,17 @@ class BlindController:
         self, config: BlindConfig, adapters: AdapterManager, transport: BleTransport,
         retry: RetryConfig, warm_connection_s: float = 30.0,
         telemetry: Telemetry | None = None, state_listener: StateListener | None = None,
+        battery_history: BatteryHistory | None = None,
     ) -> None:
         self.config, self._adapters, self._transport = config, adapters, transport
         self._retry, self._warm_s = retry, warm_connection_s
         self._telemetry = telemetry or (lambda _event, _fields: None)
         self._state_listener = state_listener or (lambda _blind_id, _state: None)
         self.state = PositionState()
+        self.battery_read_since_start = False
+        self._battery_history = battery_history
+        if battery_history is not None:
+            battery_history.restore(config.address, self.state)
         self._lock = asyncio.Lock()
         self._session: _Session | None = None
         self._feedback = PositionFeedback(
@@ -311,19 +317,7 @@ class BlindController:
                     rail_read_ms = (time.monotonic() - rail_read_started) * 1000
                     battery_read_ms: float | None = None
                     try:
-                        battery_started = time.monotonic()
-                        raw = await asyncio.wait_for(
-                            session.connection.read(BATTERY_CHARACTERISTIC),
-                            self._retry.gatt_timeout_s,
-                        )
-                        self.state.battery = battery_from_read(raw)
-                        battery_read_ms = (time.monotonic() - battery_started) * 1000
-                        session.battery_read_attempted = True
-                        self._state_listener(self.config.id, self.state)
-                        self._emit(
-                            "battery_read", value=self.state.battery,
-                            source="status_refresh", battery_read_ms=battery_read_ms,
-                        )
+                        battery_read_ms = await self._read_session_battery(session, "status_refresh")
                     except Exception as exc:
                         self._emit("battery_read_failed", source="status_refresh",
                                    error_category=self._error_category(exc),
@@ -470,23 +464,32 @@ class BlindController:
             )
             raise
 
+    async def _read_session_battery(self, session: _Session, source: str, **context: object) -> float:
+        started = time.monotonic()
+        raw = await asyncio.wait_for(session.connection.read(BATTERY_CHARACTERISTIC),
+                                     self._retry.gatt_timeout_s)
+        value = battery_from_read(raw)
+        duration_ms = (time.monotonic() - started) * 1000
+        session.battery_read_attempted = True
+        self.battery_read_since_start = True
+        self.state.observe_battery(value, time.time())
+        self._emit(
+            "battery_read", value=value, accepted_value=self.state.battery,
+            battery_status=self.state.battery_status, source=source,
+            battery_read_ms=duration_ms, **context,
+        )
+        if self._battery_history is not None:
+            self._battery_history.record(self.config.address, self.state)
+        self._state_listener(self.config.id, self.state)
+        return duration_ms
+
     async def read_battery(self) -> int | None:
-        """Read once during an existing warm connection; never opens one solely here."""
+        """Read an existing warm connection and return the accepted percentage."""
         async with self._lock:
             if not self._session or not self._session.connection.connected:
                 return None
-            started = time.monotonic()
-            raw = await asyncio.wait_for(self._session.connection.read(BATTERY_CHARACTERISTIC),
-                                         self._retry.gatt_timeout_s)
-            value = battery_from_read(raw)
-            self._session.battery_read_attempted = True
-            self.state.battery = value
-            self._state_listener(self.config.id, self.state)
-            self._emit(
-                "battery_read", value=value, source="warm_connection",
-                battery_read_ms=(time.monotonic() - started) * 1000,
-            )
-            return value
+            await self._read_session_battery(self._session, "warm_connection")
+            return self.state.battery
 
     async def _maybe_read_battery(self, session: _Session, command_id: str) -> None:
         if session.battery_read_attempted:
@@ -495,16 +498,7 @@ class BlindController:
         # A failure never changes an otherwise completed movement result.
         session.battery_read_attempted = True
         try:
-            started = time.monotonic()
-            raw = await asyncio.wait_for(session.connection.read(BATTERY_CHARACTERISTIC),
-                                         self._retry.gatt_timeout_s)
-            self.state.battery = battery_from_read(raw)
-            self._state_listener(self.config.id, self.state)
-            self._emit(
-                "battery_read", value=self.state.battery,
-                source="post_command", command_id=command_id,
-                battery_read_ms=(time.monotonic() - started) * 1000,
-            )
+            await self._read_session_battery(session, "post_command", command_id=command_id)
         except Exception as exc:
             self._emit(
                 "battery_read_failed", source="post_command", command_id=command_id,
@@ -548,3 +542,5 @@ class BlindController:
         self._closed = True
         async with self._lock:
             await self._drop_session("shutdown")
+        if self._battery_history is not None:
+            await self._battery_history.flush()

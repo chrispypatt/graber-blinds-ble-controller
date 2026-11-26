@@ -1,11 +1,13 @@
 import asyncio
 import json
+import threading
 import time
 
 import pytest
 
 from graber.bluetooth.adapter_manager import AdapterManager, ResolvedAdapter
 from graber.bluetooth.ble_transport import DiscoveredDevice
+from graber.control.battery import BatteryHistory
 from graber.control.blind import BlindController
 from graber.control.commands import BlindCommand, Outcome
 from graber.config import AdapterConfig, BlindConfig, RetryConfig
@@ -74,7 +76,7 @@ class FakeTransport:
 
 
 def make_controller(connection, *, failures=0, feedback_timeout=0.08, dual=False,
-                    telemetry=None):
+                    telemetry=None, battery_history=None):
     adapter = AdapterConfig("external", "AA:BB:CC:DD:EE:FF", max_connections=2)
     async def resolver(_):
         return [ResolvedAdapter("external", adapter.controller_address, "hci9", "1-1.2")]
@@ -84,7 +86,7 @@ def make_controller(connection, *, failures=0, feedback_timeout=0.08, dual=False
                         feedback_timeout_s=feedback_timeout, backoff_s=0, jitter_s=0)
     return BlindController(
         blind, manager, FakeTransport(connection, failures), retry,
-        warm_connection_s=30, telemetry=telemetry,
+        warm_connection_s=30, telemetry=telemetry, battery_history=battery_history,
     )
 
 
@@ -293,6 +295,48 @@ def test_post_command_battery_reads_once_per_connection_even_after_a_recent_refr
                 if event == "battery_read" and fields["source"] == "post_command"
             )
             assert completed_index < post_command_index
+        finally:
+            await blind.close()
+    asyncio.run(scenario())
+
+
+def test_battery_filter_across_status_command_and_warm_reads_and_restart(tmp_path):
+    async def scenario():
+        path = tmp_path / "battery.json"
+        reads = {BOTTOM_POSITION_CHARACTERISTIC: bytes([42]), BATTERY_CHARACTERISTIC: bytes([94])}
+        first = make_controller(FakeConnection(reads=reads), battery_history=BatteryHistory(path))
+        try:
+            assert (await first.refresh_status()).battery == 94
+            assert first.battery_read_since_start
+            accepted_at = first.state.battery_accepted_at
+        finally:
+            await first.close()
+
+        reads[BATTERY_CHARACTERISTIC] = bytes([0])
+        events = []
+        blind = make_controller(FakeConnection(reads=reads), battery_history=BatteryHistory(path),
+                                telemetry=lambda event, fields: events.append((event, fields)))
+        try:
+            assert not blind.battery_read_since_start and blind.state.updated_at is None
+            result = await blind.execute(BlindCommand("move", CommandKind.SET_POSITION, Rail.BOTTOM, 42))
+            assert result.outcome is Outcome.COMPLETED
+            assert blind.battery_read_since_start
+            assert blind.state.battery_status == "zero_unconfirmed"
+            assert await blind.read_battery() == 94
+            assert blind.state.battery_status == "zero_repeated"
+            assert blind.state.battery_accepted_at == accepted_at
+            reads[BATTERY_CHARACTERISTIC] = b""
+            before = blind.state.battery_fields()
+            await blind.refresh_status()
+            assert blind.state.battery_fields() == before
+            reads[BATTERY_CHARACTERISTIC] = bytes([92])
+            assert (await blind.refresh_status()).battery == 92
+            assert blind.state.battery_status == "reported"
+            assert blind.state.battery_accepted_at == blind.state.battery_read_at
+            samples = [(f["source"], f["value"], f["accepted_value"])
+                       for e, f in events if e == "battery_read"]
+            assert samples == [("post_command", 0, 94), ("warm_connection", 0, 94),
+                               ("status_refresh", 92, 92)]
         finally:
             await blind.close()
     asyncio.run(scenario())
@@ -593,4 +637,28 @@ def test_cancellation_does_not_interrupt_status_disconnect():
         with pytest.raises(asyncio.CancelledError):
             await refresh
         assert not connection.connected
+    asyncio.run(scenario())
+
+
+def test_slow_battery_history_write_releases_status_connection(tmp_path, monkeypatch):
+    async def scenario():
+        unblock = threading.Event()
+        started = threading.Event()
+
+        def slow_write(_path, _content):
+            started.set()
+            assert unblock.wait(timeout=3)
+
+        monkeypatch.setattr("graber.control.battery.write_private_text", slow_write)
+        reads = {BOTTOM_POSITION_CHARACTERISTIC: bytes([42]), BATTERY_CHARACTERISTIC: bytes([95])}
+        connection = FakeConnection(reads=reads)
+        blind = make_controller(connection, battery_history=BatteryHistory(tmp_path / "battery.json"))
+        try:
+            state = await asyncio.wait_for(blind.refresh_status(), timeout=1)
+            assert state.battery == 95 and not connection.connected
+            assert await asyncio.to_thread(started.wait, 1)
+        finally:
+            unblock.set()
+            await blind.close()
+
     asyncio.run(scenario())
